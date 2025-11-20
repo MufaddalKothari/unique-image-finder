@@ -37,29 +37,41 @@ class SearchThread(QThread):
         self.work_dir = work_dir
         self.criteria = criteria
 
-    def run(self):
-        # Scan both directories
-        self.progress.emit(5)
-        ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
-        self.progress.emit(40)
-        work_files = scan_images_in_directory(self.work_dir) if self.work_dir else []
-        self.progress.emit(70)
+# Replace the SearchThread.run method in ui/main_window.py with this run() implementation
+def run(self):
+    # Scan both directories
+    self.progress.emit(5)
+    ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
+    self.progress.emit(40)
+    work_files = scan_images_in_directory(self.work_dir) if self.work_dir else []
+    self.progress.emit(70)
 
-        # Find duplicates and uniques
-        duplicates = find_duplicates(ref_files, work_files, self.criteria)
+    # Find duplicates and uniques
+    duplicates = find_duplicates(ref_files, work_files, self.criteria)
+
+    # DEFENSIVE: find_uniques should return a tuple (unique_in_ref, unique_in_work).
+    # If it unexpectedly returns None (due to an internal error), normalize it to empty lists
+    try:
         uniques = find_uniques(ref_files, work_files, self.criteria)
-        self.progress.emit(95)
+        if uniques is None:
+            uniques = ([], [])
+    except Exception as e:
+        # log the error and continue with empty uniques so UI doesn't crash
+        import logging
+        logging.exception("find_uniques failed: %s", e)
+        uniques = ([], [])
 
-        self.results_ready.emit({
-            "duplicates": duplicates,
-            "unique_in_ref": uniques[0],
-            "unique_in_work": uniques[1],
-            "ref_files": ref_files,
-            "work_files": work_files,
-            "criteria": self.criteria
-        })
-        self.progress.emit(100)
+    self.progress.emit(95)
 
+    self.results_ready.emit({
+        "duplicates": duplicates,
+        "unique_in_ref": uniques[0],
+        "unique_in_work": uniques[1],
+        "ref_files": ref_files,
+        "work_files": work_files,
+        "criteria": self.criteria
+    })
+    self.progress.emit(100)
 
 class MainWindow(QWidget):
     def __init__(self):
