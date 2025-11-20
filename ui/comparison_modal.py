@@ -5,19 +5,24 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QColor
 from PyQt5.QtCore import Qt
 import os
+from datetime import datetime
+
+def _human_ts(ts):
+    try:
+        return datetime.fromtimestamp(int(ts)).isoformat(sep=' ')
+    except Exception:
+        return str(ts)
 
 class ComparisonModal(QDialog):
     """
-    Comparison modal shows the two images side-by-side and displays metadata
-    in a two-column table. It accepts a callback to notify the caller about
-    delete actions. The callback signature: callback(action: str, paths: list[str])
-    where action is one of: 'delete_both', 'delete_ref', 'delete_work', 'keep_both'
+    Comparison modal shows the two images side-by-side and displays extended metadata
+    in a two-column table. It accepts a callback to notify the caller about deletion actions.
     """
 
     def __init__(self, image1_path, image2_path, meta1: dict, meta2: dict, match_criteria: str, action_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Image Comparison")
-        self.setMinimumWidth(900)
+        self.setMinimumWidth(1000)
         self._action_callback = action_callback
         self._ref_path = image1_path
         self._work_path = image2_path
@@ -30,7 +35,7 @@ class ComparisonModal(QDialog):
         if os.path.exists(image1_path):
             pix1 = QPixmap(image1_path)
             if not pix1.isNull():
-                img1_label.setPixmap(pix1.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                img1_label.setPixmap(pix1.scaled(420, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 img1_label.setText("Unable to load image")
         else:
@@ -45,7 +50,7 @@ class ComparisonModal(QDialog):
         if os.path.exists(image2_path):
             pix2 = QPixmap(image2_path)
             if not pix2.isNull():
-                img2_label.setPixmap(pix2.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                img2_label.setPixmap(pix2.scaled(420, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 img2_label.setText("Unable to load image")
         else:
@@ -54,9 +59,25 @@ class ComparisonModal(QDialog):
         imgs_layout.addWidget(img2_label)
         layout.addLayout(imgs_layout)
 
-        # Metadata table
+        # Metadata table: extended keys including creation & copyright/artist/origin
+        keys = [
+            ("Name", "name"),
+            ("Size (bytes)", "size"),
+            ("Path", "path"),
+            ("Dims (W×H)", "dimensions"),
+            ("Mode", "mode"),
+            ("Created (fs)", "created"),
+            ("EXIF DateTimeOriginal", "datetime_original"),
+            ("Artist / Author", "artist"),
+            ("Copyright", "copyright"),
+            ("Camera Make", "make"),
+            ("Camera Model", "model"),
+            ("Image Description", "image_description"),
+            ("Origin", "origin"),
+            ("MTime", "mtime")
+        ]
+
         table = QTableWidget()
-        keys = ["name", "size", "path", "dimensions", "mode", "mtime"]
         table.setRowCount(len(keys))
         table.setColumnCount(2)
         table.setHorizontalHeaderLabels(["Reference", "Working"])
@@ -64,23 +85,35 @@ class ComparisonModal(QDialog):
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setSelectionMode(QTableWidget.NoSelection)
 
-        for row, key in enumerate(keys):
+        for row, (label, key) in enumerate(keys):
             left_val = meta1.get(key, "")
             right_val = meta2.get(key, "")
-            left_item = QTableWidgetItem(str(left_val))
-            right_item = QTableWidgetItem(str(right_val))
+
+            # Format some fields for readability
+            if key in ("created", "mtime") and left_val:
+                left_display = _human_ts(left_val)
+            else:
+                left_display = left_val
+
+            if key in ("created", "mtime") and right_val:
+                right_display = _human_ts(right_val)
+            else:
+                right_display = right_val
+
+            left_item = QTableWidgetItem(str(left_display))
+            right_item = QTableWidgetItem(str(right_display))
 
             # Highlight if equal and non-empty
-            if left_val != "" and left_val == right_val:
+            if left_display != "" and left_display == right_display:
                 left_item.setBackground(QColor(255, 230, 230))  # subtle red tint
                 right_item.setBackground(QColor(255, 230, 230))
 
             table.setItem(row, 0, left_item)
             table.setItem(row, 1, right_item)
-            table.setVerticalHeaderItem(row, QTableWidgetItem(key.capitalize()))
+            table.setVerticalHeaderItem(row, QTableWidgetItem(label))
 
         table.resizeColumnsToContents()
-        table.setFixedHeight(min(200 + 30 * len(keys), 400))
+        table.setFixedHeight(min(240 + 28 * len(keys), 520))
         layout.addWidget(table)
 
         layout.addWidget(QLabel(f"<span style='color:red'>Match Criteria: {match_criteria}</span>"))

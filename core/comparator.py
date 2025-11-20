@@ -2,13 +2,100 @@
 core/comparator.py
 
 Contains logic for comparing ImageFileObj objects for duplicates and uniques using
-size, name, and metadata. Hash-based comparisons are left for future wiring (imagehash + hash_cache).
+size, name, metadata (expanded) and placeholder for hash-based comparisons.
 """
 
 from typing import List, Tuple, Dict, Any
+from datetime import datetime
+
+def _format_ts(ts):
+    try:
+        return datetime.fromtimestamp(int(ts)).isoformat(sep=' ')
+    except Exception:
+        return str(ts)
 
 def _match_metadata(a, b):
-    """Return list of reasons for metadata matches (dimensions, mode)."""
+    """
+    Compare extended metadata fields between two image objects and return a list
+    of reasons (human-friendly keys) that matched.
+
+    Fields compared:
+      - dimensions
+      - mode
+      - created (filesystem creation time)
+      - copyright
+      - artist
+      - datetime_original (EXIF DateTimeOriginal)
+      - make (camera make)
+      - model (camera model)
+      - image_description
+      - origin (if available in metadata)
+    """
+    reasons = []
+
+    # dimensions and mode (existing checks)
+    if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
+        reasons.append("dimensions")
+    if getattr(a, "mode", None) and getattr(b, "mode", None) and a.mode == b.mode:
+        reasons.append("mode")
+
+    # Filesystem creation time (exact match)
+    if getattr(a, "created", None) is not None and getattr(b, "created", None) is not None:
+        try:
+            if int(a.created) == int(b.created):
+                reasons.append("created")
+            else:
+                # optional: consider same-day equivalence (not added to reasons unless equal)
+                pass
+        except Exception:
+            pass
+
+    # Copyright
+    ca = getattr(a, "copyright", None)
+    cb = getattr(b, "copyright", None)
+    if ca and cb and str(ca).strip() == str(cb).strip():
+        reasons.append("copyright")
+
+    # Artist / Author
+    aa = getattr(a, "artist", None)
+    ab = getattr(b, "artist", None)
+    if aa and ab and str(aa).strip() == str(ab).strip():
+        reasons.append("artist")
+
+    # EXIF original datetime
+    da = getattr(a, "datetime_original", None)
+    db = getattr(b, "datetime_original", None)
+    if da and db and str(da).strip() == str(db).strip():
+        reasons.append("datetime_original")
+
+    # Camera make/model
+    ma = getattr(a, "make", None)
+    mb = getattr(b, "make", None)
+    if ma and mb and str(ma).strip() == str(mb).strip():
+        reasons.append("make")
+    moa = getattr(a, "model", None)
+    mob = getattr(b, "model", None)
+    if moa and mob and str(moa).strip() == str(mob).strip():
+        reasons.append("model")
+
+    # Image description / caption
+    ia = getattr(a, "image_description", None)
+    ib = getattr(b, "image_description", None)
+    if ia and ib and str(ia).strip() == str(ib).strip():
+        reasons.append("image_description")
+
+    # Origin (non-standard; some tools/windows show origin in details tab; may come from XMP/IPTC/XP tags).
+    oa = getattr(a, "origin", None)
+    ob = getattr(b, "origin", None)
+    if oa and ob and str(oa).strip() == str(ob).strip():
+        reasons.append("origin")
+
+    return reasons
+
+# Existing comparator logic (keeps other functionality)
+
+def _match_metadata_simple(a, b):
+    """Backward-compat simple metadata matching (dimensions & mode only)."""
     reasons = []
     if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
         reasons.append("dimensions")
@@ -20,6 +107,12 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
     """
     Find duplicate pairs between ref_files and work_files according to criteria.
 
+    criteria keys (booleans and optional params):
+      - size: match by file size
+      - name: match by filename
+      - metadata: match by image metadata (dimensions, mode, and expanded fields)
+      - hash: match by hash (not implemented here)
+      - hash_type, hash_size, similarity: parameters for hashing (unused here)
     Returns list of tuples: (ref_file, work_file, [reasons])
     """
     matches = []
@@ -52,22 +145,20 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
             reasons = []
             if criteria.get("size") and getattr(r, "size", None) is not None and getattr(w, "size", None) is not None and r.size == w.size:
                 reasons.append("size")
-            if criteria.get("name") and getattr(r, "name", None) and getattr(w, "name", None) and r.name == w.name:
+            if criteria.get("name") and r.name and w.name and r.name == w.name:
                 reasons.append("name")
             if criteria.get("metadata"):
                 reasons += _match_metadata(r, w)
             # hash criteria not implemented here (requires imagehash & cache)
             # Accept pair if any criterion matched
             if reasons:
-                # dedupe reasons while preserving order
-                unique_reasons = list(dict.fromkeys(reasons))
-                matches.append((r, w, unique_reasons))
+                matches.append((r, w, list(dict.fromkeys(reasons))))  # unique reasons
     return matches
 
 def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> Tuple[List, List]:
     """
-    Return (unique_in_ref, unique_in_work) based on simple exact filename/size/metadata key
-    depending on criteria. Conservative: if a file's composed key exists in other set, it's not unique.
+    Return (unique_in_ref, unique_in_work) using composed key from criteria.
+    """
     """
     def key(f):
         parts = []
@@ -78,6 +169,10 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) ->
         if criteria.get("metadata"):
             parts.append(str(f.dimensions) if getattr(f, "dimensions", None) else "")
             parts.append(f.mode or "")
+            # include some extended metadata in uniqueness key as optional
+            parts.append(str(getattr(f, "datetime_original", "") or ""))
+            parts.append(str(getattr(f, "artist", "") or ""))
+            parts.append(str(getattr(f, "copyright", "") or ""))
         # If no criteria selected fall back to filename
         if not parts:
             parts.append(f.name or "")
@@ -97,3 +192,4 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) ->
             unique_in_work.append(f)
 
     return unique_in_ref, unique_in_work
+"""
