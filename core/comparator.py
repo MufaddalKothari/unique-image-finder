@@ -4,7 +4,6 @@ core/comparator.py
 Contains logic for comparing ImageFileObj objects for duplicates and uniques using
 size, name, metadata (expanded) and placeholder for hash-based comparisons.
 """
-
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
 
@@ -93,7 +92,6 @@ def _match_metadata(a, b):
     return reasons
 
 # Existing comparator logic (keeps other functionality)
-
 def _match_metadata_simple(a, b):
     """Backward-compat simple metadata matching (dimensions & mode only)."""
     reasons = []
@@ -159,37 +157,41 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) ->
     """
     Return (unique_in_ref, unique_in_work) using composed key from criteria.
     """
-    """
-    def key(f):
-        parts = []
-        if criteria.get("name"):
-            parts.append(f.name or "")
-        if criteria.get("size"):
-            parts.append(str(f.size) if getattr(f, "size", None) is not None else "")
-        if criteria.get("metadata"):
-            parts.append(str(f.dimensions) if getattr(f, "dimensions", None) else "")
-            parts.append(f.mode or "")
-            # include some extended metadata in uniqueness key as optional
-            parts.append(str(getattr(f, "datetime_original", "") or ""))
-            parts.append(str(getattr(f, "artist", "") or ""))
-            parts.append(str(getattr(f, "copyright", "") or ""))
-        # If no criteria selected fall back to filename
-        if not parts:
-            parts.append(f.name or "")
-        return "|".join(parts)
+    try:
+        def key(f):
+            parts = []
+            if criteria.get("name"):
+                parts.append(f.name or "")
+            if criteria.get("size"):
+                parts.append(str(f.size) if getattr(f, "size", None) is not None else "")
+            if criteria.get("metadata"):
+                parts.append(str(f.dimensions) if getattr(f, "dimensions", None) else "")
+                parts.append(f.mode or "")
+                # include some extended metadata in uniqueness key as optional
+                parts.append(str(getattr(f, "datetime_original", "") or ""))
+                parts.append(str(getattr(f, "artist", "") or ""))
+                parts.append(str(getattr(f, "copyright", "") or ""))
+            # If no criteria selected fall back to filename
+            if not parts:
+                parts.append(f.name or "")
+            return "|".join(parts)
 
-    ref_keys = {key(f): f for f in ref_files}
-    work_keys = {key(f): f for f in work_files}
+        ref_keys = {key(f): f for f in ref_files}
+        work_keys = {key(f): f for f in work_files}
 
-    unique_in_ref = []
-    unique_in_work = []
+        unique_in_ref = []
+        unique_in_work = []
 
-    for k, f in ref_keys.items():
-        if k not in work_keys:
-            unique_in_ref.append(f)
-    for k, f in work_keys.items():
-        if k not in ref_keys:
-            unique_in_work.append(f)
+        for k, f in ref_keys.items():
+            if k not in work_keys:
+                unique_in_ref.append(f)
+        for k, f in work_keys.items():
+            if k not in ref_keys:
+                unique_in_work.append(f)
 
-    return unique_in_ref, unique_in_work
-"""
+        return unique_in_ref, unique_in_work
+    except Exception as e:
+        import logging
+        logging.exception("find_uniques error: %s", e)
+        # On error, return empty lists instead of None so callers don't crash.
+        return [], []
