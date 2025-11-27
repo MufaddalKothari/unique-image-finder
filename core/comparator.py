@@ -6,7 +6,6 @@ Rewritten comparator: constructs comparison keys using selected fields and compa
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
 
-
 def _get_field_value(f, field_name):
     """Return a normalized value for the given field on ImageFileObj f."""
     val = None
@@ -41,7 +40,7 @@ def _get_field_value(f, field_name):
     # Normalize
     if val is None:
         return None
-    # For tuples (dimensions) keep as-is but convert to tuple for stable key
+    # For tuples (dimensions) keep as-is but convert to string for key
     if isinstance(val, (tuple, list)):
         return tuple(val)
     if isinstance(val, int):
@@ -52,13 +51,11 @@ def _get_field_value(f, field_name):
         s = s.lower()
     return s
 
-
 def _build_key(f, fields: List[str]):
     parts = []
     for fld in fields:
         parts.append(str(_get_field_value(f, fld)))
     return "|".join(parts)
-
 
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
     """
@@ -74,12 +71,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
     # If no explicit fields selected, use legacy options
     if not fields:
         # fallback to previous behavior using size/name/metadata flags
-        # import the metadata matcher from this module if present (keeps older behavior)
-        try:
-            from core.comparator import _match_metadata  # pragma: no cover
-        except Exception:
-            _match_metadata = lambda a, b: []
-
+        from core.comparator import _match_metadata
         # simple O(n*m) fallback
         for r in ref_files:
             for w in work_files:
@@ -115,7 +107,6 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                 if matched:
                     matches.append((r, w, matched))
     return matches
-
 
 def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> Tuple[List, List]:
     """
