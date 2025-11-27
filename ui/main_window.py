@@ -1,14 +1,5 @@
-"""
-ui/main_window.py
-
-Complete main window implementing:
-- directory selectors
-- search options (size/name/metadata/hash with dropdowns)
-- search thread that scans and compares
-- results rendering (duplicates + uniques)
-- comparison modal integration and deletion callbacks
-- bulk actions: delete all duplicates, keep all duplicates, save uniques
-"""
+# ui/main_window.py
+# Overwrite ui/main_window.py with updated UI that supports field selection, per-image checkboxes, and footer actions.
 
 import os
 import shutil
@@ -16,16 +7,17 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QGroupBox, QFileDialog, QComboBox, QCheckBox, QProgressBar,
-    QScrollArea, QSizePolicy, QFrame, QMessageBox, QToolButton
+    QScrollArea, QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from core.image_scanner import scan_images_in_directory, ImageFileObj
 from core.comparator import find_duplicates, find_uniques
 from .styles import GLASSY_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
+from send2trash import send2trash
 
 class SearchThread(QThread):
     results_ready = pyqtSignal(object)   # will emit a dict with results
@@ -37,41 +29,43 @@ class SearchThread(QThread):
         self.work_dir = work_dir
         self.criteria = criteria
 
-# Replace the SearchThread.run method in ui/main_window.py with this run() implementation
-def run(self):
-    # Scan both directories
-    self.progress.emit(5)
-    ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
-    self.progress.emit(40)
-    work_files = scan_images_in_directory(self.work_dir) if self.work_dir else []
-    self.progress.emit(70)
+    def run(self):
+        # Scan both directories
+        self.progress.emit(5)
+        ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
+        self.progress.emit(40)
+        work_files = scan_images_in_directory(self.work_dir) if self.work_dir else []
+        self.progress.emit(70)
 
-    # Find duplicates and uniques
-    duplicates = find_duplicates(ref_files, work_files, self.criteria)
-
-    # DEFENSIVE: find_uniques should return a tuple (unique_in_ref, unique_in_work).
-    # If it unexpectedly returns None (due to an internal error), normalize it to empty lists
-    try:
-        uniques = find_uniques(ref_files, work_files, self.criteria)
-        if uniques is None:
-            uniques = ([], [])
-    except Exception as e:
-        # log the error and continue with empty uniques so UI doesn't crash
-        import logging
-        logging.exception("find_uniques failed: %s", e)
+        duplicates = []
         uniques = ([], [])
+        try:
+            duplicates = find_duplicates(ref_files, work_files, self.criteria)
+        except Exception as e:
+            import logging
+            logging.exception("find_duplicates failed: %s", e)
 
-    self.progress.emit(95)
+        try:
+            uniques = find_uniques(ref_files, work_files, self.criteria)
+            if uniques is None:
+                uniques = ([], [])
+        except Exception as e:
+            import logging
+            logging.exception("find_uniques failed: %s", e)
+            uniques = ([], [])
 
-    self.results_ready.emit({
-        "duplicates": duplicates,
-        "unique_in_ref": uniques[0],
-        "unique_in_work": uniques[1],
-        "ref_files": ref_files,
-        "work_files": work_files,
-        "criteria": self.criteria
-    })
-    self.progress.emit(100)
+        self.progress.emit(95)
+
+        self.results_ready.emit({
+            "duplicates": duplicates,
+            "unique_in_ref": uniques[0],
+            "unique_in_work": uniques[1],
+            "ref_files": ref_files,
+            "work_files": work_files,
+            "criteria": self.criteria
+        })
+        self.progress.emit(100)
+
 
 class MainWindow(QWidget):
     def __init__(self):
@@ -103,51 +97,55 @@ class MainWindow(QWidget):
         dir_layout.addWidget(work_btn)
         layout.addLayout(dir_layout)
 
-        # Search options
+        # Search options group
         opts_group = QGroupBox("Search Options")
         opts_layout = QHBoxLayout()
 
-        self.size_cb = QCheckBox("By Size")
-        self.name_cb = QCheckBox("By Name")
-        self.meta_cb = QCheckBox("By Metadata")
-        self.unique_cb = QCheckBox("Find Uniques")
-        self.hash_cb = QCheckBox("By Hash")
+        # Replacing name/size checkboxes with a field selector (QToolButton + QMenu)
+        self.field_selector_btn = QToolButton()
+        self.field_selector_btn.setText("Compare fields ▾")
+        self.field_selector_btn.setPopupMode(QToolButton.InstantPopup)
+        self.field_menu = QMenu(self)
+        self.field_actions = {}
+        fields = [
+            ("Name", "name"),
+            ("Size (bytes)", "size"),
+            ("Created (fs)", "created"),
+            ("Last modified (mtime)", "mtime"),
+            ("Dimensions", "dimensions"),
+            ("Mode", "mode"),
+            ("Camera Make", "make"),
+            ("Camera Model", "model"),
+            ("Artist / Author", "artist"),
+            ("Copyright", "copyright"),
+            ("EXIF DateTimeOriginal", "datetime_original"),
+            ("Origin (XMP/IPTC)", "origin"),
+        ]
+        for label, key in fields:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            self.field_menu.addAction(act)
+            self.field_actions[key] = act
+        self.field_selector_btn.setMenu(self.field_menu)
 
-        # Hash controls: use dropdowns (preset integer values) instead of sliders
+        # Hash controls kept separate
+        self.hash_cb = QCheckBox("By Hash")
         self.hash_type = QComboBox()
         self.hash_type.addItems(["Average Hash", "Perceptual Hash", "Difference Hash", "Wavelet Hash"])
-        self.hash_type.setEnabled(False)
-
-        # Hash size presets (integers)
         self.hash_size_combo = QComboBox()
         hash_size_presets = ["4", "6", "8", "10", "12", "14", "16"]
         self.hash_size_combo.addItems(hash_size_presets)
         self.hash_size_combo.setCurrentText("8")
-        self.hash_size_combo.setEnabled(False)
-
-        # Similarity presets (percent integers)
         self.similarity_combo = QComboBox()
         similarity_presets = ["50", "60", "70", "75", "80", "85", "90", "95", "98", "100"]
         self.similarity_combo.addItems(similarity_presets)
         self.similarity_combo.setCurrentText("90")
-        self.similarity_combo.setEnabled(False)
-
-        # Info icon next to hash selector
         self.hash_info_btn = QToolButton()
         self.hash_info_btn.setText("ℹ")
         self.hash_info_btn.setAutoRaise(True)
-        self.hash_info_btn.setEnabled(False)
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
-        # Enable/disable hash controls when checkbox toggled
-        self.hash_cb.toggled.connect(self.hash_type.setEnabled)
-        self.hash_cb.toggled.connect(self.hash_size_combo.setEnabled)
-        self.hash_cb.toggled.connect(self.similarity_combo.setEnabled)
-        self.hash_cb.toggled.connect(self.hash_info_btn.setEnabled)
-
-        opts_layout.addWidget(self.size_cb)
-        opts_layout.addWidget(self.name_cb)
-        opts_layout.addWidget(self.meta_cb)
+        opts_layout.addWidget(self.field_selector_btn)
         opts_layout.addWidget(self.hash_cb)
         opts_layout.addWidget(QLabel("Type:"))
         opts_layout.addWidget(self.hash_type)
@@ -156,7 +154,7 @@ class MainWindow(QWidget):
         opts_layout.addWidget(self.hash_size_combo)
         opts_layout.addWidget(QLabel("Similarity (%):"))
         opts_layout.addWidget(self.similarity_combo)
-        opts_layout.addWidget(self.unique_cb)
+
         opts_group.setLayout(opts_layout)
         layout.addWidget(opts_group)
 
@@ -169,7 +167,7 @@ class MainWindow(QWidget):
         act_layout.addWidget(self.progress)
         layout.addLayout(act_layout)
 
-        # Results area (scrollable)
+        # Results area
         self.results_area = QScrollArea()
         self.results_area.setWidgetResizable(True)
         layout.addWidget(self.results_area)
@@ -178,31 +176,61 @@ class MainWindow(QWidget):
         self.results_layout.setAlignment(Qt.AlignTop)
         self.results_area.setWidget(self.results_container)
 
-        # Footer actions (bulk)
+        # Footer with bulk buttons (existing + new Move/Delete with dropdown)
         bulk_layout = QHBoxLayout()
         self.delete_btn = QPushButton("🗑️ Delete All Duplicates")
         self.keep_btn = QPushButton("✅ Keep All Duplicates")
         self.save_uniques_btn = QPushButton("💾 Save Uniques to New Directory")
+
+        # New: Move and Delete with dropdown menus
+        self.move_btn = QToolButton()
+        self.move_btn.setText("Move ▾")
+        self.move_btn.setPopupMode(QToolButton.InstantPopup)
+        self.move_menu = QMenu(self)
+        move_to_folder_action = QAction("Move selected to folder...", self)
+        self.move_menu.addAction(move_to_folder_action)
+        self.move_btn.setMenu(self.move_menu)
+
+        self.delete_drop_btn = QToolButton()
+        self.delete_drop_btn.setText("Delete ▾")
+        self.delete_drop_btn.setPopupMode(QToolButton.InstantPopup)
+        self.delete_menu = QMenu(self)
+        delete_selected_action = QAction("Delete selected (move to Trash)", self)
+        self.delete_menu.addAction(delete_selected_action)
+        self.delete_drop_btn.setMenu(self.delete_menu)
+
+        # Selected count label
+        self.selected_count_lbl = QLabel("Selected: 0")
+
         bulk_layout.addWidget(self.delete_btn)
         bulk_layout.addWidget(self.keep_btn)
         bulk_layout.addWidget(self.save_uniques_btn)
+        bulk_layout.addStretch()
+        bulk_layout.addWidget(self.move_btn)
+        bulk_layout.addWidget(self.delete_drop_btn)
+        bulk_layout.addWidget(self.selected_count_lbl)
         layout.addLayout(bulk_layout)
 
-        # Connect signals
+        # Connections
         self.search_btn.clicked.connect(self.on_search_clicked)
         self.delete_btn.clicked.connect(self._on_delete_all_duplicates)
         self.keep_btn.clicked.connect(self._on_keep_all_duplicates)
         self.save_uniques_btn.clicked.connect(self._on_save_uniques)
+        move_to_folder_action.triggered.connect(self._on_move_selected)
+        delete_selected_action.triggered.connect(self._on_delete_selected)
 
-        # Add drop shadows to primary buttons for visual depth
-        for btn in (self.search_btn, ref_btn, work_btn, self.delete_btn, self.keep_btn, self.save_uniques_btn):
-            effect = QGraphicsDropShadowEffect(blurRadius=12, xOffset=0, yOffset=3)
-            effect.setColor(Qt.gray)
-            btn.setGraphicsEffect(effect)
+        for btn in (self.search_btn, ref_btn, work_btn, self.delete_btn, self.keep_btn, self.save_uniques_btn, self.move_btn, self.delete_drop_btn):
+            try:
+                effect = QGraphicsDropShadowEffect(blurRadius=12, xOffset=0, yOffset=3)
+                effect.setColor(Qt.gray)
+                btn.setGraphicsEffect(effect)
+            except Exception:
+                pass
 
-        # thread & last results placeholder
         self._thread = None
         self._last_results = None
+        # Track selected image paths
+        self._selected_paths = set()
 
     def _open_hash_info(self):
         dlg = HashInfoDialog(self)
@@ -214,6 +242,10 @@ class MainWindow(QWidget):
         if dlg.exec_():
             target_line_edit.setText(dlg.selectedFiles()[0])
 
+    def _get_selected_fields(self):
+        # Return list of field keys currently checked
+        return [k for k, act in self.field_actions.items() if act.isChecked()]
+
     def on_search_clicked(self):
         ref = self.ref_dir.text().strip()
         work = self.work_dir.text().strip()
@@ -222,27 +254,28 @@ class MainWindow(QWidget):
             self.results_layout.addWidget(QLabel("Please select both reference and working directories."))
             return
 
-        # Build criteria from UI (include selected integers for hash size and similarity)
+        # gather criteria fields
+        fields = self._get_selected_fields()
         hash_size_val = int(self.hash_size_combo.currentText()) if self.hash_cb.isChecked() else None
         similarity_val = int(self.similarity_combo.currentText()) if self.hash_cb.isChecked() else None
 
         criteria = {
-            "size": self.size_cb.isChecked(),
-            "name": self.name_cb.isChecked(),
-            "metadata": self.meta_cb.isChecked(),
+            "fields": fields,
+            "size": False,  # legacy booleans left False to rely on fields
+            "name": False,
+            "metadata": True,
             "hash": self.hash_cb.isChecked(),
             "hash_type": self.hash_type.currentText() if self.hash_cb.isChecked() else None,
             "hash_size": hash_size_val,
             "similarity": similarity_val,
-            "find_uniques": self.unique_cb.isChecked()
+            "find_uniques": False
         }
 
-        # Disable search while working
+        # disable UI while searching
         self.search_btn.setEnabled(False)
         self._clear_results()
         self.progress.setValue(0)
 
-        # Start worker thread
         self._thread = SearchThread(ref, work, criteria)
         self._thread.progress.connect(self._on_progress)
         self._thread.results_ready.connect(self._on_results_ready)
@@ -253,16 +286,16 @@ class MainWindow(QWidget):
         self.progress.setValue(value)
 
     def _on_results_ready(self, payload):
-        # Store for later bulk actions
         self._last_results = payload
+        self._selected_paths.clear()
+        self._update_selected_count()
+
         duplicates = payload.get("duplicates", [])
         unique_in_ref = payload.get("unique_in_ref", [])
         unique_in_work = payload.get("unique_in_work", [])
         criteria = payload.get("criteria", {})
 
-        # If the user explicitly asked to Find Uniques, do not show duplicates at all.
         if criteria.get("find_uniques"):
-            # Show only uniques
             header = QLabel("<b>Uniques</b>")
             self.results_layout.addWidget(header)
             if unique_in_ref:
@@ -273,9 +306,8 @@ class MainWindow(QWidget):
                 self.results_layout.addWidget(QLabel("<i>Only in Working</i>"))
                 for f in unique_in_work:
                     self._add_unique_widget(f, side="work")
-            return  # do not render duplicates
+            return
 
-        # Otherwise, show duplicates first (if any) then uniques
         if duplicates:
             header = QLabel("<b>Duplicates / Matches</b>")
             self.results_layout.addWidget(header)
@@ -299,6 +331,12 @@ class MainWindow(QWidget):
         row.setFrameShape(QFrame.StyledPanel)
         row_layout = QHBoxLayout(row)
 
+        # selection checkboxes for each side
+        cb_r = QCheckBox()
+        cb_r.stateChanged.connect(lambda s, p=r.path: self._on_path_toggled(p, s))
+        cb_w = QCheckBox()
+        cb_w.stateChanged.connect(lambda s, p=w.path: self._on_path_toggled(p, s))
+
         # thumbnails
         thumb_r = QLabel()
         pixr = QPixmap(r.path)
@@ -316,23 +354,23 @@ class MainWindow(QWidget):
 
         info_lbl = QLabel(f"Ref: {r.path}\nWork: {w.path}\nMatch: {', '.join(reasons)}")
         compare_btn = QPushButton("Compare")
-        # closure captures current r,w,reasons
         compare_btn.clicked.connect(lambda _, a=r, b=w, rs=reasons: self._open_compare_modal(a, b, rs))
 
+        row_layout.addWidget(cb_r)
         row_layout.addWidget(thumb_r)
+        row_layout.addWidget(cb_w)
         row_layout.addWidget(thumb_w)
         row_layout.addWidget(info_lbl)
         row_layout.addWidget(compare_btn)
         self.results_layout.addWidget(row)
 
     def _add_unique_widget(self, f: ImageFileObj, side: str = "ref"):
-        """
-        Add a thumbnail + metadata for a unique file. side indicates if it's unique
-        in reference or in working folder.
-        """
         row = QFrame()
         row.setFrameShape(QFrame.StyledPanel)
         row_layout = QHBoxLayout(row)
+
+        cb = QCheckBox()
+        cb.stateChanged.connect(lambda s, p=f.path: self._on_path_toggled(p, s))
 
         thumb = QLabel()
         pix = QPixmap(f.path)
@@ -343,14 +381,24 @@ class MainWindow(QWidget):
 
         info_lbl = QLabel()
         info_lbl.setText(f"{'Reference' if side == 'ref' else 'Working'} unique\nName: {f.name}\nSize: {f.size}\nDims: {f.dimensions}\nPath: {f.path}")
-        # Add a small action button to open in file manager or view larger
         open_btn = QPushButton("Open")
         open_btn.clicked.connect(lambda _, p=f.path: os.startfile(p) if os.path.exists(p) else None)
 
+        row_layout.addWidget(cb)
         row_layout.addWidget(thumb)
         row_layout.addWidget(info_lbl)
         row_layout.addWidget(open_btn)
         self.results_layout.addWidget(row)
+
+    def _on_path_toggled(self, path, state):
+        if state == Qt.Checked:
+            self._selected_paths.add(path)
+        else:
+            self._selected_paths.discard(path)
+        self._update_selected_count()
+
+    def _update_selected_count(self):
+        self.selected_count_lbl.setText(f"Selected: {len(self._selected_paths)}")
 
     def _open_compare_modal(self, ref_file, work_file, reasons):
         meta1 = {
@@ -359,7 +407,15 @@ class MainWindow(QWidget):
             "path": ref_file.path,
             "dimensions": ref_file.dimensions,
             "mode": ref_file.mode,
-            "mtime": ref_file.mtime
+            "mtime": ref_file.mtime,
+            "created": getattr(ref_file, 'created', None),
+            "datetime_original": getattr(ref_file, 'datetime_original', None),
+            "artist": getattr(ref_file, 'artist', None),
+            "copyright": getattr(ref_file, 'copyright', None),
+            "make": getattr(ref_file, 'make', None),
+            "model": getattr(ref_file, 'model', None),
+            "image_description": getattr(ref_file, 'image_description', None),
+            "origin": getattr(ref_file, 'origin', None)
         }
         meta2 = {
             "name": work_file.name,
@@ -367,39 +423,35 @@ class MainWindow(QWidget):
             "path": work_file.path,
             "dimensions": work_file.dimensions,
             "mode": work_file.mode,
-            "mtime": work_file.mtime
+            "mtime": work_file.mtime,
+            "created": getattr(work_file, 'created', None),
+            "datetime_original": getattr(work_file, 'datetime_original', None),
+            "artist": getattr(work_file, 'artist', None),
+            "copyright": getattr(work_file, 'copyright', None),
+            "make": getattr(work_file, 'make', None),
+            "model": getattr(work_file, 'model', None),
+            "image_description": getattr(work_file, 'image_description', None),
+            "origin": getattr(work_file, 'origin', None)
         }
-        # Pass action callback so modal can ask main window to delete files
         modal = ComparisonModal(ref_file.path, work_file.path, meta1, meta2, ", ".join(reasons), action_callback=self._on_modal_action, parent=self)
         modal.exec_()
 
     def _on_modal_action(self, action: str, paths: list):
-        """
-        Called by the comparison modal when a delete/keep action is confirmed.
-        action: 'delete_both', 'delete_ref', 'delete_work', 'keep_both'
-        paths: list of file paths to delete (or empty list)
-        """
         if action.startswith("delete") and paths:
             errors = []
             for p in paths:
                 try:
                     if os.path.exists(p):
-                        os.remove(p)
+                        send2trash(p)
                 except Exception as e:
                     errors.append((p, str(e)))
-            # Remove relevant widgets from UI
             self._remove_widgets_for_paths(paths)
             if errors:
-                QMessageBox.warning(self, "Delete errors", f"Some files could not be deleted:\n{errors}")
+                QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
         elif action == "keep_both":
-            # Nothing to delete; maybe just close modal. We do nothing here.
             pass
 
     def _remove_widgets_for_paths(self, paths):
-        """
-        Remove any widgets in results_layout that reference any path in paths.
-        """
-        # Build a set for faster checks
         path_set = set(paths)
         i = 0
         while i < self.results_layout.count():
@@ -407,7 +459,6 @@ class MainWindow(QWidget):
             widget = item.widget()
             should_remove = False
             if widget:
-                # Check all QLabel text in widget for a path substring
                 labels = widget.findChildren(QLabel)
                 for lbl in labels:
                     txt = lbl.text() or ""
@@ -421,14 +472,10 @@ class MainWindow(QWidget):
                 w = self.results_layout.takeAt(i).widget()
                 if w is not None:
                     w.deleteLater()
-                # do not increment i, because items shifted left
             else:
                 i += 1
 
     def _on_delete_all_duplicates(self):
-        """
-        Delete working-side files for all duplicates found in last search.
-        """
         if not self._last_results:
             QMessageBox.information(self, "No results", "No search results to act on.")
             return
@@ -450,21 +497,17 @@ class MainWindow(QWidget):
         for p in to_delete:
             try:
                 if os.path.exists(p):
-                    os.remove(p)
+                    send2trash(p)
             except Exception as e:
                 errors.append((p, str(e)))
 
-        # Remove deleted widgets from UI
         self._remove_widgets_for_paths(to_delete)
         if errors:
-            QMessageBox.warning(self, "Delete errors", f"Some files could not be deleted:\n{errors}")
+            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
         else:
-            QMessageBox.information(self, "Done", "All duplicate working files deleted.")
+            QMessageBox.information(self, "Done", "All duplicate working files moved to Trash.")
 
     def _on_keep_all_duplicates(self):
-        """
-        Keep all duplicates: simply remove duplicates from the UI as "kept" without file ops.
-        """
         if not self._last_results:
             QMessageBox.information(self, "No results", "No search results to act on.")
             return
@@ -473,22 +516,14 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "No duplicates", "No duplicates found.")
             return
 
-        # Remove duplicates widgets from UI (no deletion)
         to_remove_paths = []
         for (r, w, reasons) in duplicates:
-            # pick both paths so any widget containing either will be removed
             to_remove_paths.append(r.path)
             to_remove_paths.append(w.path)
         self._remove_widgets_for_paths(to_remove_paths)
         QMessageBox.information(self, "Done", "Duplicates removed from view (kept on disk).")
 
     def _on_save_uniques(self):
-        """
-        Save uniques to a new directory chosen by the user.
-        Copies unique files into two subfolders:
-          <target>/reference_uniques/
-          <target>/working_uniques/
-        """
         if not self._last_results:
             QMessageBox.information(self, "No results", "No search results available. Run a search first.")
             return
@@ -500,7 +535,6 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "No uniques", "No unique files found to save.")
             return
 
-        # Ask user to pick a destination folder
         dlg = QFileDialog(self, caption="Select destination folder")
         dlg.setFileMode(QFileDialog.Directory)
         if not dlg.exec_():
@@ -509,8 +543,6 @@ class MainWindow(QWidget):
         dest_path = Path(dest_dir)
 
         errors = []
-
-        # Helper to copy list to subfolder
         def _copy_list(files, subfolder_name):
             if not files:
                 return
@@ -522,7 +554,6 @@ class MainWindow(QWidget):
                     errors.append((str(src), "Source not found"))
                     continue
                 dest_file = folder / src.name
-                # Handle name collision by appending a counter
                 counter = 1
                 base = dest_file.stem
                 suffix = dest_file.suffix
@@ -543,8 +574,55 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, "Done", f"Unique files copied to:\n{dest_path}")
 
+    def _on_move_selected(self):
+        if not self._selected_paths:
+            QMessageBox.information(self, "No selection", "No files selected to move.")
+            return
+        dlg = QFileDialog(self, caption="Select destination folder")
+        dlg.setFileMode(QFileDialog.Directory)
+        if not dlg.exec_():
+            return
+        dest_dir = dlg.selectedFiles()[0]
+        errors = []
+        for p in list(self._selected_paths):
+            try:
+                if os.path.exists(p):
+                    dest = os.path.join(dest_dir, os.path.basename(p))
+                    shutil.move(p, dest)
+                    # remove related widgets
+                    self._remove_widgets_for_paths([p])
+                    self._selected_paths.discard(p)
+            except Exception as e:
+                errors.append((p, str(e)))
+        self._update_selected_count()
+        if errors:
+            QMessageBox.warning(self, "Move errors", f"Some files could not be moved:\n{errors}")
+        else:
+            QMessageBox.information(self, "Done", "Selected files moved.")
+
+    def _on_delete_selected(self):
+        if not self._selected_paths:
+            QMessageBox.information(self, "No selection", "No files selected to delete.")
+            return
+        reply = QMessageBox.question(self, "Confirm delete", f"Move {len(self._selected_paths)} selected files to Trash?", QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        errors = []
+        for p in list(self._selected_paths):
+            try:
+                if os.path.exists(p):
+                    send2trash(p)
+                    self._remove_widgets_for_paths([p])
+                    self._selected_paths.discard(p)
+            except Exception as e:
+                errors.append((p, str(e)))
+        self._update_selected_count()
+        if errors:
+            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
+        else:
+            QMessageBox.information(self, "Done", "Selected files moved to Trash.")
+
     def _clear_results(self):
-        # Remove all widgets from results_layout
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
             widget = item.widget()
