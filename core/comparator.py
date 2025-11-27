@@ -1,180 +1,145 @@
 """
 core/comparator.py
 
-Contains logic for comparing ImageFileObj objects for duplicates and uniques using
-size, name, metadata (expanded) and placeholder for hash-based comparisons.
+Rewritten comparator: constructs comparison keys using selected fields and compares files exactly on those fields.
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
 
-def _format_ts(ts):
-    try:
-        return datetime.fromtimestamp(int(ts)).isoformat(sep=' ')
-    except Exception:
-        return str(ts)
 
-def _match_metadata(a, b):
-    """
-    Compare extended metadata fields between two image objects and return a list
-    of reasons (human-friendly keys) that matched.
+def _get_field_value(f, field_name):
+    """Return a normalized value for the given field on ImageFileObj f."""
+    val = None
+    if field_name == "name":
+        val = getattr(f, "name", None)
+    elif field_name == "size":
+        val = getattr(f, "size", None)
+    elif field_name == "mtime":
+        val = getattr(f, "mtime", None)
+    elif field_name == "created":
+        val = getattr(f, "created", None)
+    elif field_name == "dimensions":
+        val = getattr(f, "dimensions", None)
+    elif field_name == "mode":
+        val = getattr(f, "mode", None)
+    elif field_name == "make":
+        val = getattr(f, "make", None)
+    elif field_name == "model":
+        val = getattr(f, "model", None)
+    elif field_name == "artist":
+        val = getattr(f, "artist", None)
+    elif field_name == "copyright":
+        val = getattr(f, "copyright", None)
+    elif field_name == "datetime_original":
+        val = getattr(f, "datetime_original", None)
+    elif field_name == "origin":
+        val = getattr(f, "origin", None)
+    else:
+        # Fallback to getattr
+        val = getattr(f, field_name, None)
 
-    Fields compared:
-      - dimensions
-      - mode
-      - created (filesystem creation time)
-      - copyright
-      - artist
-      - datetime_original (EXIF DateTimeOriginal)
-      - make (camera make)
-      - model (camera model)
-      - image_description
-      - origin (if available in metadata)
-    """
-    reasons = []
+    # Normalize
+    if val is None:
+        return None
+    # For tuples (dimensions) keep as-is but convert to tuple for stable key
+    if isinstance(val, (tuple, list)):
+        return tuple(val)
+    if isinstance(val, int):
+        return int(val)
+    s = str(val).strip()
+    # Lowercase where appropriate (strings like artist/copyright/camera make/model)
+    if field_name in ("name", "artist", "copyright", "make", "model", "origin"):
+        s = s.lower()
+    return s
 
-    # dimensions and mode (existing checks)
-    if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
-        reasons.append("dimensions")
-    if getattr(a, "mode", None) and getattr(b, "mode", None) and a.mode == b.mode:
-        reasons.append("mode")
 
-    # Filesystem creation time (exact match)
-    if getattr(a, "created", None) is not None and getattr(b, "created", None) is not None:
-        try:
-            if int(a.created) == int(b.created):
-                reasons.append("created")
-            else:
-                # optional: consider same-day equivalence (not added to reasons unless equal)
-                pass
-        except Exception:
-            pass
+def _build_key(f, fields: List[str]):
+    parts = []
+    for fld in fields:
+        parts.append(str(_get_field_value(f, fld)))
+    return "|".join(parts)
 
-    # Copyright
-    ca = getattr(a, "copyright", None)
-    cb = getattr(b, "copyright", None)
-    if ca and cb and str(ca).strip() == str(cb).strip():
-        reasons.append("copyright")
-
-    # Artist / Author
-    aa = getattr(a, "artist", None)
-    ab = getattr(b, "artist", None)
-    if aa and ab and str(aa).strip() == str(ab).strip():
-        reasons.append("artist")
-
-    # EXIF original datetime
-    da = getattr(a, "datetime_original", None)
-    db = getattr(b, "datetime_original", None)
-    if da and db and str(da).strip() == str(db).strip():
-        reasons.append("datetime_original")
-
-    # Camera make/model
-    ma = getattr(a, "make", None)
-    mb = getattr(b, "make", None)
-    if ma and mb and str(ma).strip() == str(mb).strip():
-        reasons.append("make")
-    moa = getattr(a, "model", None)
-    mob = getattr(b, "model", None)
-    if moa and mob and str(moa).strip() == str(mob).strip():
-        reasons.append("model")
-
-    # Image description / caption
-    ia = getattr(a, "image_description", None)
-    ib = getattr(b, "image_description", None)
-    if ia and ib and str(ia).strip() == str(ib).strip():
-        reasons.append("image_description")
-
-    # Origin (non-standard; some tools/windows show origin in details tab; may come from XMP/IPTC/XP tags).
-    oa = getattr(a, "origin", None)
-    ob = getattr(b, "origin", None)
-    if oa and ob and str(oa).strip() == str(ob).strip():
-        reasons.append("origin")
-
-    return reasons
-
-# Existing comparator logic (keeps other functionality)
-def _match_metadata_simple(a, b):
-    """Backward-compat simple metadata matching (dimensions & mode only)."""
-    reasons = []
-    if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
-        reasons.append("dimensions")
-    if getattr(a, "mode", None) and getattr(b, "mode", None) and a.mode == b.mode:
-        reasons.append("mode")
-    return reasons
 
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
     """
-    Find duplicate pairs between ref_files and work_files according to criteria.
-
-    criteria keys (booleans and optional params):
-      - size: match by file size
-      - name: match by filename
-      - metadata: match by image metadata (dimensions, mode, and expanded fields)
-      - hash: match by hash (not implemented here)
-      - hash_type, hash_size, similarity: parameters for hashing (unused here)
-    Returns list of tuples: (ref_file, work_file, [reasons])
+    Find duplicate pairs using exact equality of the selected fields. If no fields selected, fall back to size/name as prior behavior.
+    Returns list of tuples: (ref_file, work_file, [matched_fields])
     """
     matches = []
     if not ref_files or not work_files:
         return matches
 
-    # Pre-index work files by simple keys if criteria asked for it
-    index_by_size = {}
-    index_by_name = {}
+    fields = criteria.get("fields") or []
+
+    # If no explicit fields selected, use legacy options
+    if not fields:
+        # fallback to previous behavior using size/name/metadata flags
+        # import the metadata matcher from this module if present (keeps older behavior)
+        try:
+            from core.comparator import _match_metadata  # pragma: no cover
+        except Exception:
+            _match_metadata = lambda a, b: []
+
+        # simple O(n*m) fallback
+        for r in ref_files:
+            for w in work_files:
+                reasons = []
+                if criteria.get("size") and getattr(r, "size", None) is not None and getattr(w, "size", None) is not None and r.size == w.size:
+                    reasons.append("size")
+                if criteria.get("name") and getattr(r, "name", None) and getattr(w, "name", None) and r.name == w.name:
+                    reasons.append("name")
+                if criteria.get("metadata"):
+                    reasons += _match_metadata(r, w)
+                if reasons:
+                    matches.append((r, w, list(dict.fromkeys(reasons))))
+        return matches
+
+    # Build index of work files by key
+    index = {}
     for w in work_files:
-        if criteria.get("size") and getattr(w, "size", None) is not None:
-            index_by_size.setdefault(w.size, []).append(w)
-        if criteria.get("name") and getattr(w, "name", None):
-            index_by_name.setdefault(w.name, []).append(w)
+        key = _build_key(w, fields)
+        index.setdefault(key, []).append(w)
 
     for r in ref_files:
-        possible = set()
-        # If size criterion, begin from size bucket
-        if criteria.get("size") and getattr(r, "size", None) is not None:
-            possible.update(index_by_size.get(r.size, []))
-        # If name criterion, include name bucket
-        if criteria.get("name") and getattr(r, "name", None):
-            possible.update(index_by_name.get(r.name, []))
-        # If neither size nor name selected, compare against all work files (fall back)
-        if not criteria.get("size") and not criteria.get("name"):
-            possible.update(work_files)
-
-        # Evaluate each candidate for matching reasons
-        for w in possible:
-            reasons = []
-            if criteria.get("size") and getattr(r, "size", None) is not None and getattr(w, "size", None) is not None and r.size == w.size:
-                reasons.append("size")
-            if criteria.get("name") and r.name and w.name and r.name == w.name:
-                reasons.append("name")
-            if criteria.get("metadata"):
-                reasons += _match_metadata(r, w)
-            # hash criteria not implemented here (requires imagehash & cache)
-            # Accept pair if any criterion matched
-            if reasons:
-                matches.append((r, w, list(dict.fromkeys(reasons))))  # unique reasons
+        key = _build_key(r, fields)
+        if key in index and key != "None|None|None":
+            # all fields matched exactly
+            for w in index[key]:
+                # compute which specific fields matched (non-empty and equal)
+                matched = []
+                for fld in fields:
+                    va = _get_field_value(r, fld)
+                    vb = _get_field_value(w, fld)
+                    if va is not None and vb is not None and va == vb:
+                        matched.append(fld)
+                if matched:
+                    matches.append((r, w, matched))
     return matches
+
 
 def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> Tuple[List, List]:
     """
-    Return (unique_in_ref, unique_in_work) using composed key from criteria.
+    Return unique_in_ref, unique_in_work using keys based on selected fields (or legacy behavior).
     """
     try:
+        fields = criteria.get("fields") or []
+
         def key(f):
-            parts = []
-            if criteria.get("name"):
-                parts.append(f.name or "")
-            if criteria.get("size"):
-                parts.append(str(f.size) if getattr(f, "size", None) is not None else "")
-            if criteria.get("metadata"):
-                parts.append(str(f.dimensions) if getattr(f, "dimensions", None) else "")
-                parts.append(f.mode or "")
-                # include some extended metadata in uniqueness key as optional
-                parts.append(str(getattr(f, "datetime_original", "") or ""))
-                parts.append(str(getattr(f, "artist", "") or ""))
-                parts.append(str(getattr(f, "copyright", "") or ""))
-            # If no criteria selected fall back to filename
-            if not parts:
-                parts.append(f.name or "")
-            return "|".join(parts)
+            if not fields:
+                # legacy key
+                parts = []
+                if criteria.get("name"):
+                    parts.append(f.name or "")
+                if criteria.get("size"):
+                    parts.append(str(f.size) if getattr(f, "size", None) is not None else "")
+                if criteria.get("metadata"):
+                    parts.append(str(f.dimensions) if getattr(f, "dimensions", None) else "")
+                    parts.append(f.mode or "")
+                if not parts:
+                    parts.append(f.name or "")
+                return "|".join(parts)
+            else:
+                return _build_key(f, fields)
 
         ref_keys = {key(f): f for f in ref_files}
         work_keys = {key(f): f for f in work_files}
@@ -193,5 +158,4 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]) ->
     except Exception as e:
         import logging
         logging.exception("find_uniques error: %s", e)
-        # On error, return empty lists instead of None so callers don't crash.
         return [], []
