@@ -1,4 +1,4 @@
 PyQt5>=5.15
 Pillow>=8.0
-# Optional (for future hash-based matching)
 imagehash>=4.2
+send2trash>=1.8.0
