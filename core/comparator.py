@@ -4,11 +4,7 @@ core/comparator.py
 Rewritten comparator: constructs comparison keys using selected fields and compares files exactly on those fields.
 Also supports perceptual hashing (imagehash) when criteria['hash'] is True.
 
-Behavior:
-- If criteria['fields'] is non-empty, pairs that match exactly on ALL selected fields are reported.
-- Additionally, if criteria['hash'] is True, image hashes are computed (per criteria['hash_type'] and criteria['hash_size'])
-  and any pair with similarity >= criteria['similarity'] is reported (similarity is percentage based on Hamming distance).
-- Returns list of tuples: (ref_file, work_file, [matched_reasons])
+Includes a local _match_metadata fallback (no circular imports).
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -71,6 +67,70 @@ def _build_key(f, fields: List[str]):
     for fld in fields:
         parts.append(str(_get_field_value(f, fld)))
     return "|".join(parts)
+
+
+def _match_metadata(a, b):
+    """
+    Local metadata matching fallback function.
+    Returns list of matching reason strings.
+    """
+    reasons = []
+
+    # dimensions and mode
+    if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
+        reasons.append("dimensions")
+    if getattr(a, "mode", None) and getattr(b, "mode", None) and a.mode == b.mode:
+        reasons.append("mode")
+
+    # Filesystem creation time (exact match)
+    if getattr(a, "created", None) is not None and getattr(b, "created", None) is not None:
+        try:
+            if int(a.created) == int(b.created):
+                reasons.append("created")
+        except Exception:
+            pass
+
+    # Copyright
+    ca = getattr(a, "copyright", None)
+    cb = getattr(b, "copyright", None)
+    if ca and cb and str(ca).strip() == str(cb).strip():
+        reasons.append("copyright")
+
+    # Artist / Author
+    aa = getattr(a, "artist", None)
+    ab = getattr(b, "artist", None)
+    if aa and ab and str(aa).strip() == str(ab).strip():
+        reasons.append("artist")
+
+    # EXIF original datetime
+    da = getattr(a, "datetime_original", None)
+    db = getattr(b, "datetime_original", None)
+    if da and db and str(da).strip() == str(db).strip():
+        reasons.append("datetime_original")
+
+    # Camera make/model
+    ma = getattr(a, "make", None)
+    mb = getattr(b, "make", None)
+    if ma and mb and str(ma).strip() == str(mb).strip():
+        reasons.append("make")
+    moa = getattr(a, "model", None)
+    mob = getattr(b, "model", None)
+    if moa and mob and str(moa).strip() == str(mob).strip():
+        reasons.append("model")
+
+    # Image description / caption
+    ia = getattr(a, "image_description", None)
+    ib = getattr(b, "image_description", None)
+    if ia and ib and str(ia).strip() == str(ib).strip():
+        reasons.append("image_description")
+
+    # Origin (XMP/IPTC)
+    oa = getattr(a, "origin", None)
+    ob = getattr(b, "origin", None)
+    if oa and ob and str(oa).strip() == str(ob).strip():
+        reasons.append("origin")
+
+    return reasons
 
 
 # helper to compute imagehash for a path with caching
@@ -168,12 +228,6 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
 
     # 2) Legacy fallback when no fields selected (size/name/metadata)
     if not fields:
-        # import optional metadata matcher if present (keeps earlier behavior)
-        try:
-            from core.comparator import _match_metadata  # type: ignore
-        except Exception:
-            _match_metadata = lambda a, b: []
-
         for r in ref_files:
             for w in work_files:
                 pair_key = (r.path, w.path)
