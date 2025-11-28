@@ -4,7 +4,10 @@ core/comparator.py
 Rewritten comparator: constructs comparison keys using selected fields and compares files exactly on those fields.
 Also supports perceptual hashing (imagehash) when criteria['hash'] is True.
 
-Includes a local _match_metadata fallback (no circular imports).
+Improvements:
+- Robust Hamming distance computation using numpy when available.
+- Defensive logging showing unique hash counts for ref/work sets to help debug overmatching.
+- No circular imports; includes local _match_metadata fallback.
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -160,7 +163,7 @@ def _compute_hashes_for_paths(paths: List[str], hash_type: str, hash_size: int) 
                 # ensure RGB for consistent hashing
                 if im.mode not in ("RGB", "RGBA"):
                     im = im.convert("RGB")
-                # imagehash functions accept hash_size kw
+                # imagehash functions accept hash_size kw for most functions
                 try:
                     h = func(im, hash_size=hash_size)
                 except TypeError:
@@ -176,18 +179,50 @@ def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -
     """
     Compute similarity in percent between two ImageHash instances:
       similarity = 100 * (1 - (hamming_distance / num_bits))
+
+    This implementation first attempts a numpy-based difference on the underlying arrays,
+    which is robust. If numpy is not available or an unexpected error occurs, it falls
+    back to imagehash's subtraction operator.
     """
     if h1 is None or h2 is None:
         return 0.0
     try:
-        dist = (h1 - h2)
-        num_bits = h1.hash.size
+        # Try numpy-based distance for reliability
+        arr1 = getattr(h1, "hash", None)
+        arr2 = getattr(h2, "hash", None)
+        if arr1 is not None and arr2 is not None:
+            # arr1, arr2 are numpy arrays; compute differing bits
+            try:
+                import numpy as _np  # local import
+                dist = int(_np.count_nonzero(arr1 != arr2))
+                num_bits = int(arr1.size)
+            except Exception:
+                # fallback to element-wise Python loop
+                flat1 = arr1.flatten().tolist() if hasattr(arr1, "flatten") else list(arr1)
+                flat2 = arr2.flatten().tolist() if hasattr(arr2, "flatten") else list(arr2)
+                dist = sum(1 for a, b in zip(flat1, flat2) if a != b)
+                num_bits = len(flat1)
+        else:
+            # Fallback: use imagehash subtraction which returns Hamming distance
+            dist = int(h1 - h2)
+            # try to infer number of bits from bit-length heuristics
+            try:
+                num_bits = int(h1.hash.size)
+            except Exception:
+                num_bits = max(1, dist)
         if num_bits == 0:
             return 0.0
         sim = 100.0 * (1.0 - (dist / float(num_bits)))
         return max(0.0, min(100.0, sim))
-    except Exception:
-        return 0.0
+    except Exception as e:
+        logger.debug("Hash similarity compute failed: %s", e)
+        try:
+            dist = int(h1 - h2)
+            num_bits = getattr(h1, "hash", None).size if getattr(h1, "hash", None) is not None else 64
+            sim = 100.0 * (1.0 - (dist / float(num_bits)))
+            return max(0.0, min(100.0, sim))
+        except Exception:
+            return 0.0
 
 
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
@@ -256,6 +291,15 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         # compute hashes (only once per search)
         ref_hashes = _compute_hashes_for_paths(ref_paths, hash_type, hash_size)
         work_hashes = _compute_hashes_for_paths(work_paths, hash_type, hash_size)
+
+        # Debugging: log unique hash counts so we can spot problems
+        try:
+            unique_ref_hashes = len(set(str(h) for h in ref_hashes.values()))
+            unique_work_hashes = len(set(str(h) for h in work_hashes.values()))
+            logger.debug("Hashing: computed %d ref hashes (%d unique); %d work hashes (%d unique)",
+                         len(ref_hashes), unique_ref_hashes, len(work_hashes), unique_work_hashes)
+        except Exception:
+            pass
 
         # compare every pair (could be optimized with buckets; for now do O(n*m))
         for r in ref_files:
