@@ -691,4 +691,3 @@ class MainWindow(QWidget):
     def _on_search_finished(self):
         self.search_btn.setEnabled(True)
         self.progress.setValue(100)
-```
