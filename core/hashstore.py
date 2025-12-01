@@ -2,7 +2,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Set
 
 import imagehash
 from PIL import Image  # only for type clarity
@@ -29,7 +29,8 @@ class HashStore:
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or DEFAULT_DB
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True) if os.path.dirname(self.db_path) else None
+        if os.path.dirname(self.db_path):
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         self._ensure_table()
 
@@ -70,10 +71,7 @@ class HashStore:
         try:
             return imagehash.hex_to_hash(hexstr)
         except Exception:
-            try:
-                return imagehash.hex_to_hash(hexstr)
-            except Exception:
-                return None
+            return None
 
     def set(self, path: str, hash_obj, hash_size: int):
         if hash_obj is None:
@@ -112,12 +110,12 @@ class HashStore:
                     continue
         return out
 
-    def remove_missing(self, existing_paths):
+    def remove_missing(self, existing_paths: List[str]):
         cur = self._conn.cursor()
         cur.execute("SELECT path FROM images")
         rows = cur.fetchall()
         to_delete = []
-        existing_set = set(existing_paths)
+        existing_set: Set[str] = set(existing_paths)
         for (p,) in rows:
             if p not in existing_set:
                 to_delete.append((p,))

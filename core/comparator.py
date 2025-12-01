@@ -223,6 +223,31 @@ def _hash_similarity_percent_from_distance(dist: int, num_bits: int) -> float:
     return max(0.0, min(100.0, sim))
 
 
+def _get_cached_hashes(paths: List[str], hash_size: int) -> Tuple[Dict[str, imagehash.ImageHash], HashStore]:
+    """
+    Retrieve cached hashes from HashStore, compute missing ones, and store them.
+    Returns (hash_dict, hash_store) - caller should close hash_store when done.
+    """
+    hash_store = HashStore()
+    # Fetch cached hashes
+    hashes = hash_store.bulk_get(paths, hash_size)
+    cached_count = len(hashes)
+
+    # Compute missing hashes
+    missing_paths = [p for p in paths if p not in hashes]
+    if missing_paths:
+        logger.debug("Computing %d missing hashes (cached=%d)", len(missing_paths), cached_count)
+        computed = _compute_hashes_parallel(missing_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+        # Store newly computed hashes
+        for p, h in computed.items():
+            hash_store.set(p, h, hash_size)
+        hashes.update(computed)
+    else:
+        logger.debug("All %d hashes retrieved from cache", cached_count)
+
+    return hashes, hash_store
+
+
 # ---------- Main comparator functions ----------
 
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
@@ -294,24 +319,8 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                      len(ref_paths), len(work_paths), hash_size, similarity_threshold)
 
         # Use HashStore for caching reference hashes
-        hash_store = HashStore()
+        ref_hashes, hash_store = _get_cached_hashes(ref_paths, hash_size)
         try:
-            # Fetch cached ref hashes
-            ref_hashes = hash_store.bulk_get(ref_paths, hash_size)
-            cached_count = len(ref_hashes)
-
-            # Compute missing ref hashes
-            missing_ref_paths = [p for p in ref_paths if p not in ref_hashes]
-            if missing_ref_paths:
-                logger.debug("Computing %d missing reference hashes (cached=%d)", len(missing_ref_paths), cached_count)
-                computed_ref = _compute_hashes_parallel(missing_ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
-                # Store newly computed hashes
-                for p, h in computed_ref.items():
-                    hash_store.set(p, h, hash_size)
-                ref_hashes.update(computed_ref)
-            else:
-                logger.debug("All %d reference hashes retrieved from cache", cached_count)
-
             # Compute work hashes on the fly (not cached)
             work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
         finally:
@@ -405,24 +414,8 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]):
             work_paths = [f.path for f in work_files if getattr(f, "path", None)]
 
             # Use HashStore for caching reference hashes
-            hash_store = HashStore()
+            ref_hashes, hash_store = _get_cached_hashes(ref_paths, hash_size)
             try:
-                # Fetch cached ref hashes
-                ref_hashes = hash_store.bulk_get(ref_paths, hash_size)
-                cached_count = len(ref_hashes)
-
-                # Compute missing ref hashes
-                missing_ref_paths = [p for p in ref_paths if p not in ref_hashes]
-                if missing_ref_paths:
-                    logger.debug("Computing %d missing reference hashes (cached=%d)", len(missing_ref_paths), cached_count)
-                    computed_ref = _compute_hashes_parallel(missing_ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
-                    # Store newly computed hashes
-                    for p, h in computed_ref.items():
-                        hash_store.set(p, h, hash_size)
-                    ref_hashes.update(computed_ref)
-                else:
-                    logger.debug("All %d reference hashes retrieved from cache", cached_count)
-
                 # Compute work hashes on the fly (not cached)
                 work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
             finally:
