@@ -1,10 +1,9 @@
 # ui/main_window.py
 # Full main window updated:
-# - Similarity threshold selection is now a slider (clean, minimalistic).
-# - Compare fields button and hash controls mutually disable each other.
+# - Two "Find Uniques" checkboxes: one for Reference, one for Working.
+# - When either is checked, only uniques from the checked side(s) are displayed (duplicates suppressed).
+# - Preserves hash-vs-fields mutual exclusion and slider-based hash settings.
 # - Glassy/off-white themed larger controls and soft separators applied.
-# - Logs requests to console via debug lines (SearchThread emits progress; comparator logs hashing).
-# - Slider value displayed next to it.
 
 import os
 import shutil
@@ -170,8 +169,9 @@ class MainWindow(QWidget):
         self.field_selector_btn.setMenu(self.field_menu)
         self.field_selector_btn.setStyleSheet("QToolButton { padding: 10px 14px; font-weight:600; }")
 
-        # Find uniques checkbox
-        self.find_uniques_cb = QCheckBox("Find Uniques")
+        # Find uniques checkboxes (separate for Reference and Working)
+        self.find_uniques_ref_cb = QCheckBox("Find Uniques (Reference)")
+        self.find_uniques_work_cb = QCheckBox("Find Uniques (Working)")
 
         # Hash checkbox + slider for similarity
         self.hash_cb = QCheckBox("By Hash (phash only)")
@@ -207,7 +207,11 @@ class MainWindow(QWidget):
         self.hash_size_slider.valueChanged.connect(lambda v: self.hash_size_lbl.setText(f"Hash size: {v}"))
 
         opts_layout.addWidget(self.field_selector_btn)
-        opts_layout.addWidget(self.find_uniques_cb)
+        # place both unique checkboxes together
+        uniq_box = QHBoxLayout()
+        uniq_box.addWidget(self.find_uniques_ref_cb)
+        uniq_box.addWidget(self.find_uniques_work_cb)
+        opts_layout.addLayout(uniq_box)
         opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
         opts_layout.addWidget(self.hash_size_lbl)
@@ -358,7 +362,9 @@ class MainWindow(QWidget):
             "hash": self.hash_cb.isChecked(),
             "hash_size": int(self.hash_size_slider.value()) if self.hash_cb.isChecked() else None,
             "similarity": int(self.sim_slider.value()) if self.hash_cb.isChecked() else None,
-            "find_uniques": bool(self.find_uniques_cb.isChecked())
+            # new flags for selective unique searches
+            "find_uniques_ref": bool(self.find_uniques_ref_cb.isChecked()),
+            "find_uniques_work": bool(self.find_uniques_work_cb.isChecked())
         }
 
         logger.debug("MainWindow: starting search with criteria: %s", criteria)
@@ -376,7 +382,7 @@ class MainWindow(QWidget):
     def _on_progress(self, value: int):
         self.progress.setValue(value)
 
-    # --- Results rendering & actions (same behavior as before) ---
+    # --- Results rendering & actions ---
     def _on_results_ready(self, payload: dict):
         self._last_results = payload
         self._selected_paths.clear()
@@ -387,19 +393,31 @@ class MainWindow(QWidget):
         unique_in_work = payload.get("unique_in_work", [])
         criteria = payload.get("criteria", {})
 
-        if criteria.get("find_uniques"):
+        # If either selective unique flag is set, show only uniques from selected side(s)
+        show_ref_uniques = bool(criteria.get("find_uniques_ref"))
+        show_work_uniques = bool(criteria.get("find_uniques_work"))
+
+        if show_ref_uniques or show_work_uniques:
             header = QLabel("<b>Uniques</b>")
             self.results_layout.addWidget(header)
-            if unique_in_ref:
-                self.results_layout.addWidget(QLabel("<i>Only in Reference</i>"))
-                for f in unique_in_ref:
-                    self._add_unique_widget(f, side="ref")
-            if unique_in_work:
-                self.results_layout.addWidget(QLabel("<i>Only in Working</i>"))
-                for f in unique_in_work:
-                    self._add_unique_widget(f, side="work")
+            if show_ref_uniques:
+                if unique_in_ref:
+                    self.results_layout.addWidget(QLabel("<i>Only in Reference</i>"))
+                    for f in unique_in_ref:
+                        self._add_unique_widget(f, side="ref")
+                else:
+                    self.results_layout.addWidget(QLabel("<i>No unique files found in Reference</i>"))
+            if show_work_uniques:
+                if unique_in_work:
+                    self.results_layout.addWidget(QLabel("<i>Only in Working</i>"))
+                    for f in unique_in_work:
+                        self._add_unique_widget(f, side="work")
+                else:
+                    self.results_layout.addWidget(QLabel("<i>No unique files found in Working</i>"))
+            # Do not show duplicates when selective uniques requested
             return
 
+        # Default behavior (no selective unique requested): show duplicates and uniques
         if duplicates:
             header = QLabel("<b>Duplicates / Matches</b>")
             self.results_layout.addWidget(header)
