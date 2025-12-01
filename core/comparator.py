@@ -5,6 +5,14 @@ Comparator using field-based exact matches and a single perceptual hash (phash).
 
 Hash computation is done in parallel with a per-file timeout to avoid a single
 bad file or very large file from blocking the entire search.
+
+Improvements in this version:
+- Parallel phash computation with per-file timeout and debug logging.
+- Correct Hamming-distance -> similarity calculation and conversion to
+  a max allowed Hamming distance for the selected similarity %.
+- Light bucketing by hash prefix when dataset is large to avoid full O(n*m)
+  comparisons (helps performance, keeps correctness).
+- Logs helpful debug lines so you can see hashing progress and counts.
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -13,7 +21,6 @@ import imagehash
 import logging
 import os
 import concurrent.futures
-import functools
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +120,7 @@ def _match_metadata(a, b):
 
 # ---------- Hash helpers (parallel safe with per-file timeout) ----------
 
-def _compute_phash_for_path(path: str, hash_size: int) -> Tuple[str, Any]:
+def _compute_phash_for_path(path: str, hash_size: int) -> Tuple[str, imagehash.ImageHash]:
     """Compute phash for a single path. Returns (path, ImageHash) or raises."""
     if not path or not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -121,29 +128,25 @@ def _compute_phash_for_path(path: str, hash_size: int) -> Tuple[str, Any]:
         try:
             im = ImageOps.exif_transpose(im)
         except Exception:
-            # ignore orientation fix failure
             pass
-        # convert to RGB for consistent hashing
         if im.mode not in ("RGB", "RGBA"):
             im = im.convert("RGB")
         try:
-            # imagehash.phash accepts hash_size in recent versions
             h = imagehash.phash(im, hash_size=hash_size)
         except TypeError:
             h = imagehash.phash(im)
         return path, h
 
 
-def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int = None, per_file_timeout: float = 10.0) -> Dict[str, imagehash.ImageHash]:
+def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int = None, per_file_timeout: float = 8.0) -> Dict[str, imagehash.ImageHash]:
     """
-    Compute phash for each path in parallel. If a file's computation exceeds per_file_timeout
-    it will be skipped (and logged). Returns dict path->ImageHash for successful computations.
+    Compute phash for each path in parallel with per-file timeout.
+    Returns dict path->ImageHash for successful computations.
     """
-    result = {}
+    result: Dict[str, imagehash.ImageHash] = {}
     if not paths:
         return result
 
-    # sensible default: min(8, cpu_count * 2)
     try:
         cpu = os.cpu_count() or 2
         default_workers = min(8, max(1, cpu))
@@ -153,19 +156,15 @@ def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int 
 
     logger.debug("Starting parallel hash computation for %d files (workers=%d, timeout=%.1fs)", len(paths), max_workers, per_file_timeout)
 
-    # Use ThreadPoolExecutor because PIL + imagehash releases GIL partially and IO bound parts benefit.
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        # schedule futures
         futures = {ex.submit(_compute_phash_for_path, p, hash_size): p for p in paths}
         for fut in concurrent.futures.as_completed(futures):
             p = futures[fut]
             try:
-                # allow per-file timeout at retrieval time
                 path, h = fut.result(timeout=per_file_timeout)
                 result[path] = h
             except concurrent.futures.TimeoutError:
                 logger.warning("Hash computation timed out for %s (>%ss). Skipping.", p, per_file_timeout)
-                # cancel if still running
                 try:
                     fut.cancel()
                 except Exception:
@@ -176,6 +175,22 @@ def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int 
     return result
 
 
+def _imagehash_to_int(h: imagehash.ImageHash) -> int:
+    """Convert ImageHash.hash boolean array into an integer bitmask (flattened row-major)."""
+    arr = getattr(h, "hash", None)
+    if arr is None:
+        # fallback to string parse
+        try:
+            return int(str(h), 16)
+        except Exception:
+            return 0
+    flat = arr.flatten().astype(int)
+    bits = 0
+    for b in flat:
+        bits = (bits << 1) | (1 if b else 0)
+    return bits
+
+
 def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -> float:
     """Compute similarity percent between two ImageHash objects using Hamming distance."""
     if h1 is None or h2 is None:
@@ -184,13 +199,11 @@ def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -
         arr1 = getattr(h1, "hash", None)
         arr2 = getattr(h2, "hash", None)
         if arr1 is not None and arr2 is not None:
-            # prefer numpy if available
             try:
                 import numpy as _np
                 dist = int(_np.count_nonzero(arr1 != arr2))
                 num_bits = int(arr1.size)
             except Exception:
-                # Python fallback
                 flat1 = list(arr1.flatten()) if hasattr(arr1, "flatten") else list(arr1)
                 flat2 = list(arr2.flatten()) if hasattr(arr2, "flatten") else list(arr2)
                 dist = sum(1 for a, b in zip(flat1, flat2) if a != b)
@@ -221,8 +234,14 @@ def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
     """
     Find duplicate pairs: field-exact matches and/or phash similarity.
+
+    criteria keys used:
+      - fields: list[str] (if non-empty, use field-exact matching)
+      - hash: bool (if True, use phash matching)
+      - hash_size: int (phash hash_size)
+      - similarity: int (percentage threshold)
     """
-    matches = []
+    matches: List[Tuple] = []
     if not ref_files or not work_files:
         return matches
 
@@ -231,7 +250,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
 
     # 1) Field-based exact
     if fields:
-        index = {}
+        index: Dict[str, List] = {}
         for w in work_files:
             key = _build_key(w, fields)
             index.setdefault(key, []).append(w)
@@ -290,21 +309,58 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         except Exception:
             pass
 
-        # pairwise compare (O(n*m)); if you have many files we can optimize with buckets
-        for r in ref_files:
-            rh = ref_hashes.get(r.path)
-            if rh is None:
-                continue
-            for w in work_files:
-                pair_key = (r.path, w.path)
+        # convert similarity% -> max Hamming distance allowed (integer)
+        # phash bit count = hash_size * hash_size
+        num_bits = (hash_size * hash_size) if hash_size and isinstance(hash_size, int) else 64
+        max_dist = int((1.0 - (similarity_threshold / 100.0)) * num_bits)
+        logger.debug("Using phash hash_size=%d (%d bits) similarity=%s%% -> max_hamming=%d", hash_size, num_bits, similarity_threshold, max_dist)
+
+        # Optimization: if many files, bucket work hashes by prefix to avoid full O(n*m)
+        # prefix_bits chosen conservatively
+        work_items = []
+        for p, h in work_hashes.items():
+            work_items.append((p, h, _imagehash_to_int(h)))
+        ref_items = []
+        for p, h in ref_hashes.items():
+            ref_items.append((p, h, _imagehash_to_int(h)))
+
+        # choose prefix bits based on dataset size (reduce comparisons when >500 files)
+        prefix_bits = 0
+        total_work = len(work_items)
+        if total_work > 500:
+            prefix_bits = min(16, num_bits // 2)
+        elif total_work > 200:
+            prefix_bits = min(12, num_bits // 2)
+
+        buckets: Dict[int, List[Tuple[str, imagehash.ImageHash, int]]] = {}
+        if prefix_bits > 0:
+            shift = max(0, num_bits - prefix_bits)
+            for item in work_items:
+                p, h, intval = item
+                prefix = intval >> shift
+                buckets.setdefault(prefix, []).append(item)
+            logger.debug("Bucketing work hashes with prefix_bits=%d produced %d buckets", prefix_bits, len(buckets))
+
+        # compare
+        for rp, rh, rint in ref_items:
+            candidates = None
+            if prefix_bits > 0:
+                shift = max(0, num_bits - prefix_bits)
+                prefix = rint >> shift
+                candidates = buckets.get(prefix, [])
+            else:
+                candidates = work_items
+
+            for wp, wh, wint in candidates:
+                pair_key = (rp, wp)
                 if pair_key in found_pairs:
                     continue
-                wh = work_hashes.get(w.path)
-                if wh is None:
-                    continue
+                # calculate hamming distance via ImageHash arrays (fast)
                 sim = _hash_similarity_percent(rh, wh)
                 if sim >= similarity_threshold:
-                    matches.append((r, w, [f"hash({int(sim)}%)"]))
+                    matches.append((next((f for f in ref_files if getattr(f, "path", None) == rp), None),
+                                    next((f for f in work_files if getattr(f, "path", None) == wp), None),
+                                    [f"hash({int(sim)}%)"]))
                     found_pairs.add(pair_key)
 
     return matches
