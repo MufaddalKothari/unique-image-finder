@@ -11,6 +11,7 @@ Notes:
 - Hash computation runs in parallel with a per-file timeout to avoid hangs.
 - Bucketing by hash prefix is used when datasets are large to reduce pairwise comparisons.
 - Debug logs are emitted for hashing progress and counts. Enable logging.debug in main.py to see them.
+- Reference hashes are cached using core.hashstore.HashStore (SQLite-backed).
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -20,7 +21,12 @@ import logging
 import os
 import concurrent.futures
 
+from core.hashstore import HashStore
+
 logger = logging.getLogger(__name__)
+
+# Default hash size for dhash (16x16 produces 256-bit hashes)
+DEFAULT_HASH_SIZE = 16
 
 
 def _get_field_value(f, field_name):
@@ -217,6 +223,31 @@ def _hash_similarity_percent_from_distance(dist: int, num_bits: int) -> float:
     return max(0.0, min(100.0, sim))
 
 
+def _get_cached_hashes(paths: List[str], hash_size: int) -> Tuple[Dict[str, imagehash.ImageHash], HashStore]:
+    """
+    Retrieve cached hashes from HashStore, compute missing ones, and store them.
+    Returns (hash_dict, hash_store) - caller should close hash_store when done.
+    """
+    hash_store = HashStore()
+    # Fetch cached hashes
+    hashes = hash_store.bulk_get(paths, hash_size)
+    cached_count = len(hashes)
+
+    # Compute missing hashes
+    missing_paths = [p for p in paths if p not in hashes]
+    if missing_paths:
+        logger.debug("Computing %d missing hashes (cached=%d)", len(missing_paths), cached_count)
+        computed = _compute_hashes_parallel(missing_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+        # Store newly computed hashes
+        for p, h in computed.items():
+            hash_store.set(p, h, hash_size)
+        hashes.update(computed)
+    else:
+        logger.debug("All %d hashes retrieved from cache", cached_count)
+
+    return hashes, hash_store
+
+
 # ---------- Main comparator functions ----------
 
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
@@ -278,7 +309,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
 
     # 3) Hash-based matching (dhash only)
     if criteria.get("hash"):
-        hash_size = int(criteria.get("hash_size") or 8)
+        hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
         similarity_threshold = float(criteria.get("similarity") or 90.0)
 
         ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
@@ -287,9 +318,13 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         logger.debug("Starting dhash matching: ref=%d work=%d hash_size=%d similarity=%s%%",
                      len(ref_paths), len(work_paths), hash_size, similarity_threshold)
 
-        # compute hashes in parallel with per-file timeout to avoid hangs
-        ref_hashes = _compute_hashes_parallel(ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
-        work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+        # Use HashStore for caching reference hashes
+        ref_hashes, hash_store = _get_cached_hashes(ref_paths, hash_size)
+        try:
+            # Compute work hashes on the fly (not cached)
+            work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+        finally:
+            hash_store.close()
 
         if not ref_hashes:
             logger.warning("No reference hashes computed (0). Hash-based matching will yield no matches.")
@@ -372,14 +407,19 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]):
             logger.debug("find_uniques: hash-based unique detection requested; computing duplicates to invert")
             # reuse find_duplicates to compute pairs (but avoid recursion by calling the dhash section directly is complex).
             # Simpler: perform the same hash workflow here to gather matched paths, then invert.
-            hash_size = int(criteria.get("hash_size") or 8)
+            hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
             similarity_threshold = float(criteria.get("similarity") or 90.0)
 
             ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
             work_paths = [f.path for f in work_files if getattr(f, "path", None)]
 
-            ref_hashes = _compute_hashes_parallel(ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
-            work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+            # Use HashStore for caching reference hashes
+            ref_hashes, hash_store = _get_cached_hashes(ref_paths, hash_size)
+            try:
+                # Compute work hashes on the fly (not cached)
+                work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+            finally:
+                hash_store.close()
 
             num_bits = (hash_size * hash_size) if hash_size and isinstance(hash_size, int) else 64
             max_dist = int((1.0 - (similarity_threshold / 100.0)) * num_bits)
