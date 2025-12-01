@@ -1,6 +1,10 @@
 # ui/main_window.py
-# Full main window with glassy/off-white themed controls and the requested mutual-exclusive behavior
-# between Compare fields and Hash. Larger controls and soft separators added.
+# Full main window updated:
+# - Similarity threshold selection is now a slider (clean, minimalistic).
+# - Compare fields button and hash controls mutually disable each other.
+# - Glassy/off-white themed larger controls and soft separators applied.
+# - Logs requests to console via debug lines (SearchThread emits progress; comparator logs hashing).
+# - Slider value displayed next to it.
 
 import os
 import shutil
@@ -8,8 +12,8 @@ from pathlib import Path
 from typing import List
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
-    QGroupBox, QFileDialog, QComboBox, QCheckBox, QProgressBar,
-    QScrollArea, QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction
+    QGroupBox, QFileDialog, QCheckBox, QProgressBar, QScrollArea,
+    QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QPixmap
@@ -20,35 +24,30 @@ from .styles import GLASSY_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
 from send2trash import send2trash
+import logging
 
-# Small style tweaks to match off-white futuristic glassy app theme
+logger = logging.getLogger(__name__)
+
+
+# UI style constants
 BUTTON_GLASS_STYLE = """
-QPushButton.glass, QToolButton.glass {
-    background: rgba(250,250,252,0.85);
+QPushButton, QToolButton {
+    background: rgba(250,250,252,0.88);
     color: #0f1720;
-    border: 1px solid rgba(255,255,255,0.14);
+    border: 1px solid rgba(255,255,255,0.10);
     border-radius: 10px;
     padding: 10px 16px;
     font-size: 14px;
     font-weight: 600;
 }
-QPushButton.glass:hover, QToolButton.glass:hover {
-    background: rgba(255,255,255,0.92);
+QPushButton:hover, QToolButton:hover {
+    background: rgba(255,255,255,0.96);
 }
-QPushButton.ghost {
-    background: transparent;
-    border: 1px solid rgba(255,255,255,0.06);
-    color: #e6eef7;
-}
+QSlider#similarity_slider { min-height: 28px; }
 """
 
-# colored accent buttons (kept subtle)
-MOVE_ACCENT = "background: rgba(47,128,237,0.95); color: white;"
-DELETE_ACCENT = "background: rgba(235,87,87,0.95); color: white;"
-
-
 class SearchThread(QThread):
-    results_ready = pyqtSignal(object)
+    results_ready = pyqtSignal(object)   # will emit a dict with results
     progress = pyqtSignal(int)
 
     def __init__(self, ref_dir: str, work_dir: str, criteria: dict):
@@ -58,6 +57,7 @@ class SearchThread(QThread):
         self.criteria = criteria
 
     def run(self):
+        logger.debug("SearchThread: scanning ref: %s work: %s criteria: %s", self.ref_dir, self.work_dir, self.criteria)
         self.progress.emit(5)
         ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
         self.progress.emit(40)
@@ -67,21 +67,21 @@ class SearchThread(QThread):
         duplicates = []
         uniques = ([], [])
         try:
+            logger.debug("SearchThread: calling find_duplicates()")
             duplicates = find_duplicates(ref_files, work_files, self.criteria)
         except Exception as e:
-            import logging
-            logging.exception("find_duplicates failed: %s", e)
+            logger.exception("find_duplicates failed: %s", e)
 
         try:
             uniques = find_uniques(ref_files, work_files, self.criteria)
             if uniques is None:
                 uniques = ([], [])
         except Exception as e:
-            import logging
-            logging.exception("find_uniques failed: %s", e)
+            logger.exception("find_uniques failed: %s", e)
             uniques = ([], [])
 
         self.progress.emit(95)
+
         self.results_ready.emit({
             "duplicates": duplicates,
             "unique_in_ref": uniques[0],
@@ -96,8 +96,8 @@ class SearchThread(QThread):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Image Comparison Application")
-        self.setMinimumWidth(1200)
+        self.setWindowTitle("Unique Image Finder")
+        self.setMinimumWidth(1100)
         try:
             self.setStyleSheet(GLASSY_STYLE + BUTTON_GLASS_STYLE)
         except Exception:
@@ -105,14 +105,14 @@ class MainWindow(QWidget):
 
         layout = QVBoxLayout(self)
 
-        # Header (with soft bottom border)
-        header = QLabel("🖼️ Image Comparison Application")
-        header.setStyleSheet("font-size:28px; font-weight:700; padding:14px 0px 12px 5px; color: #eaf3ff;")
+        # Header
+        header = QLabel("🖼️ Unique Image Finder")
+        header.setStyleSheet("font-size:28px; font-weight:700; padding:14px 0px 8px 5px;")
         layout.addWidget(header)
-        header_sep = QFrame()
-        header_sep.setFrameShape(QFrame.HLine)
-        header_sep.setStyleSheet("color: rgba(255,255,255,0.06);")
-        layout.addWidget(header_sep)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: rgba(255,255,255,0.05);")
+        layout.addWidget(sep)
 
         # Directory selectors
         dir_layout = QHBoxLayout()
@@ -123,33 +123,25 @@ class MainWindow(QWidget):
         ref_btn.clicked.connect(lambda: self.browse_dir(self.ref_dir))
         work_btn.clicked.connect(lambda: self.browse_dir(self.work_dir))
 
-        # themed buttons
-        ref_btn.setObjectName("ref_btn")
-        work_btn.setObjectName("work_btn")
-        ref_btn.setProperty("class", "glass")
-        work_btn.setProperty("class", "glass")
-        ref_btn.setStyleSheet("QPushButton { padding: 8px 12px; }")
-        work_btn.setStyleSheet("QPushButton { padding: 8px 12px; }")
-
         dir_layout.addWidget(QLabel("Reference Folder (More Images):"))
         dir_layout.addWidget(self.ref_dir)
         dir_layout.addWidget(ref_btn)
-        dir_layout.addSpacing(15)
+        dir_layout.addSpacing(12)
         dir_layout.addWidget(QLabel("Working Folder (Less Images):"))
         dir_layout.addWidget(self.work_dir)
         dir_layout.addWidget(work_btn)
         layout.addLayout(dir_layout)
 
-        # Options group (with top/bottom subtle borders)
-        opts_frame_top = QFrame()
-        opts_frame_top.setFrameShape(QFrame.HLine)
-        opts_frame_top.setStyleSheet("color: rgba(255,255,255,0.03);")
-        layout.addWidget(opts_frame_top)
+        # Options
+        opts_top = QFrame()
+        opts_top.setFrameShape(QFrame.HLine)
+        opts_top.setStyleSheet("color: rgba(255,255,255,0.02);")
+        layout.addWidget(opts_top)
 
         opts_group = QGroupBox("Search Options")
         opts_layout = QHBoxLayout()
 
-        # Field selector
+        # Compare fields selector
         self.field_selector_btn = QToolButton()
         self.field_selector_btn.setText("Compare fields ▾")
         self.field_selector_btn.setPopupMode(QToolButton.InstantPopup)
@@ -177,51 +169,65 @@ class MainWindow(QWidget):
             self.field_actions[key] = act
         self.field_selector_btn.setMenu(self.field_menu)
         self.field_selector_btn.setStyleSheet("QToolButton { padding: 10px 14px; font-weight:600; }")
-        self.field_selector_btn.setProperty("class", "glass")
 
-        # Find Uniques checkbox
+        # Find uniques checkbox
         self.find_uniques_cb = QCheckBox("Find Uniques")
 
-        # Hash controls (no hash-type dropdown: phash only)
-        self.hash_cb = QCheckBox("By Hash")
+        # Hash checkbox + slider for similarity
+        self.hash_cb = QCheckBox("By Hash (phash only)")
         self.hash_cb.stateChanged.connect(self._on_hash_toggled)
-        self.hash_size_combo = QComboBox()
-        hash_size_presets = ["4", "6", "8", "10", "12"]
-        self.hash_size_combo.addItems(hash_size_presets)
-        self.hash_size_combo.setCurrentText("8")
-        self.similarity_combo = QComboBox()
-        similarity_presets = ["50", "60", "70", "75", "80", "85", "90", "95", "98", "100"]
-        self.similarity_combo.addItems(similarity_presets)
-        self.similarity_combo.setCurrentText("90")
+        self.hash_size_slider = QSlider(Qt.Horizontal)
+        self.hash_size_slider.setMinimum(4)
+        self.hash_size_slider.setMaximum(16)
+        self.hash_size_slider.setValue(8)
+        self.hash_size_slider.setTickInterval(1)
+        self.hash_size_slider.setTickPosition(QSlider.TicksBelow)
+        self.hash_size_slider.setFixedWidth(160)
+        self.hash_size_slider.setObjectName("hash_size_slider")
+        self.hash_size_lbl = QLabel("Hash size: 8")
+
+        # similarity slider and label
+        self.sim_slider = QSlider(Qt.Horizontal)
+        self.sim_slider.setMinimum(50)
+        self.sim_slider.setMaximum(100)
+        self.sim_slider.setValue(90)
+        self.sim_slider.setTickInterval(5)
+        self.sim_slider.setTickPosition(QSlider.TicksBelow)
+        self.sim_slider.setFixedWidth(220)
+        self.sim_slider.setObjectName("similarity_slider")
+        self.sim_lbl = QLabel("Similarity: 90%")
+        self.sim_slider.valueChanged.connect(lambda v: self.sim_lbl.setText(f"Similarity: {v}%"))
+
         self.hash_info_btn = QToolButton()
         self.hash_info_btn.setText("ℹ")
         self.hash_info_btn.setAutoRaise(True)
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
-        # Add controls to layout (bigger controls)
+        # wire hash size slider label
+        self.hash_size_slider.valueChanged.connect(lambda v: self.hash_size_lbl.setText(f"Hash size: {v}"))
+
         opts_layout.addWidget(self.field_selector_btn)
         opts_layout.addWidget(self.find_uniques_cb)
         opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
-        opts_layout.addWidget(QLabel("Hash Size:"))
-        opts_layout.addWidget(self.hash_size_combo)
-        opts_layout.addWidget(QLabel("Similarity (%):"))
-        opts_layout.addWidget(self.similarity_combo)
+        opts_layout.addWidget(self.hash_size_lbl)
+        opts_layout.addWidget(self.hash_size_slider)
+        opts_layout.addWidget(self.sim_lbl)
+        opts_layout.addWidget(self.sim_slider)
         opts_layout.addWidget(self.hash_info_btn)
 
         opts_group.setLayout(opts_layout)
         layout.addWidget(opts_group)
 
-        opts_frame_bot = QFrame()
-        opts_frame_bot.setFrameShape(QFrame.HLine)
-        opts_frame_bot.setStyleSheet("color: rgba(255,255,255,0.03);")
-        layout.addWidget(opts_frame_bot)
+        opts_bot = QFrame()
+        opts_bot.setFrameShape(QFrame.HLine)
+        opts_bot.setStyleSheet("color: rgba(255,255,255,0.02);")
+        layout.addWidget(opts_bot)
 
-        # Search controls
+        # Search
         act_layout = QHBoxLayout()
         self.search_btn = QPushButton("🔍 Search")
-        self.search_btn.setProperty("class", "glass")
-        self.search_btn.setStyleSheet("QPushButton { padding: 12px 20px; font-size:15px; }")
+        self.search_btn.setStyleSheet("font-size:15px; padding:10px 18px;")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         act_layout.addWidget(self.search_btn)
@@ -240,41 +246,36 @@ class MainWindow(QWidget):
         # Footer
         footer_sep = QFrame()
         footer_sep.setFrameShape(QFrame.HLine)
-        footer_sep.setStyleSheet("color: rgba(255,255,255,0.04);")
+        footer_sep.setStyleSheet("color: rgba(255,255,255,0.03);")
         layout.addWidget(footer_sep)
 
         bulk_layout = QHBoxLayout()
         self.delete_btn = QPushButton("🗑️ Delete All Duplicates")
-        self.delete_btn.setProperty("class", "glass")
         self.keep_btn = QPushButton("✅ Keep All Duplicates")
-        self.keep_btn.setProperty("class", "glass")
         self.save_uniques_btn = QPushButton("💾 Save Uniques to New Directory")
-        self.save_uniques_btn.setProperty("class", "glass")
 
-        # Move / Delete dropdowns styled larger and glassy, with color accents
         self.move_btn = QToolButton()
         self.move_btn.setText("Move ▾")
         self.move_btn.setPopupMode(QToolButton.InstantPopup)
         self.move_menu = QMenu(self)
-        move_to_folder_action = QAction("Move selected to folder...", self)
-        self.move_menu.addAction(move_to_folder_action)
+        move_action = QAction("Move selected to folder...", self)
+        self.move_menu.addAction(move_action)
         self.move_btn.setMenu(self.move_menu)
-        self.move_btn.setStyleSheet("QToolButton { padding: 10px 16px; font-weight:700; border-radius:10px; " + MOVE_ACCENT + " }")
+        self.move_btn.setStyleSheet("QToolButton { padding:10px 16px; border-radius:10px; background: rgba(47,128,237,0.95); color:#fff; }")
 
         self.delete_drop_btn = QToolButton()
         self.delete_drop_btn.setText("Delete ▾")
         self.delete_drop_btn.setPopupMode(QToolButton.InstantPopup)
         self.delete_menu = QMenu(self)
-        delete_selected_action = QAction("Delete selected (move to Trash)", self)
-        self.delete_menu.addAction(delete_selected_action)
+        del_action = QAction("Delete selected (move to Trash)", self)
+        self.delete_menu.addAction(del_action)
         self.delete_drop_btn.setMenu(self.delete_menu)
-        self.delete_drop_btn.setStyleSheet("QToolButton { padding: 10px 16px; font-weight:700; border-radius:10px; " + DELETE_ACCENT + " }")
+        self.delete_drop_btn.setStyleSheet("QToolButton { padding:10px 16px; border-radius:10px; background: rgba(235,87,87,0.95); color:#fff; }")
 
-        # subtle shadows
         try:
-            for btn in (self.move_btn, self.delete_drop_btn, self.delete_btn, self.keep_btn, self.save_uniques_btn, self.search_btn):
-                effect = QGraphicsDropShadowEffect(blurRadius=8, xOffset=0, yOffset=2)
-                btn.setGraphicsEffect(effect)
+            for b in (self.move_btn, self.delete_drop_btn, self.search_btn, self.delete_btn, self.keep_btn, self.save_uniques_btn):
+                eff = QGraphicsDropShadowEffect(blurRadius=8, xOffset=0, yOffset=2)
+                b.setGraphicsEffect(eff)
         except Exception:
             pass
 
@@ -294,15 +295,15 @@ class MainWindow(QWidget):
         self.delete_btn.clicked.connect(self._on_delete_all_duplicates)
         self.keep_btn.clicked.connect(self._on_keep_all_duplicates)
         self.save_uniques_btn.clicked.connect(self._on_save_uniques)
-        move_to_folder_action.triggered.connect(self._on_move_selected)
-        delete_selected_action.triggered.connect(self._on_delete_selected)
+        move_action.triggered.connect(self._on_move_selected)
+        del_action.triggered.connect(self._on_delete_selected)
 
-        # Internal
+        # internal state
         self._thread = None
         self._last_results = None
         self._selected_paths = set()
 
-    # ---------- UI helpers ----------
+    # --- UI helpers ---
     def _open_hash_info(self):
         dlg = HashInfoDialog(self)
         dlg.exec_()
@@ -315,21 +316,31 @@ class MainWindow(QWidget):
 
     def _on_field_toggled(self, checked: bool):
         any_checked = any(act.isChecked() for act in self.field_actions.values())
+        # disable hash controls when fields are selected
         self.hash_cb.setEnabled(not any_checked)
-        self.hash_size_combo.setEnabled(not any_checked)
-        self.similarity_combo.setEnabled(not any_checked)
+        self.hash_size_slider.setEnabled(not any_checked)
+        self.sim_slider.setEnabled(not any_checked)
         self.hash_info_btn.setEnabled(not any_checked)
+        if any_checked and self.hash_cb.isChecked():
+            # if hash was checked earlier, uncheck it to keep mutual exclusivity
+            self.hash_cb.setChecked(False)
 
     def _on_hash_toggled(self, state: int):
         checked = state == Qt.Checked
+        # disable field selector when hashing enabled
         self.field_selector_btn.setEnabled(not checked)
         for act in self.field_actions.values():
             act.setEnabled(not checked)
+        if checked:
+            # clear any active field checks to avoid ambiguity
+            for act in self.field_actions.values():
+                if act.isChecked():
+                    act.setChecked(False)
 
     def _get_selected_fields(self) -> List[str]:
         return [k for k, act in self.field_actions.items() if act.isChecked()]
 
-    # ---------- Search ----------
+    # --- Search flow ---
     def on_search_clicked(self):
         ref = self.ref_dir.text().strip()
         work = self.work_dir.text().strip()
@@ -345,10 +356,12 @@ class MainWindow(QWidget):
             "name": False,
             "metadata": True,
             "hash": self.hash_cb.isChecked(),
-            "hash_size": int(self.hash_size_combo.currentText()) if self.hash_cb.isChecked() else None,
-            "similarity": int(self.similarity_combo.currentText()) if self.hash_cb.isChecked() else None,
+            "hash_size": int(self.hash_size_slider.value()) if self.hash_cb.isChecked() else None,
+            "similarity": int(self.sim_slider.value()) if self.hash_cb.isChecked() else None,
             "find_uniques": bool(self.find_uniques_cb.isChecked())
         }
+
+        logger.debug("MainWindow: starting search with criteria: %s", criteria)
 
         self.search_btn.setEnabled(False)
         self._clear_results()
@@ -363,7 +376,7 @@ class MainWindow(QWidget):
     def _on_progress(self, value: int):
         self.progress.setValue(value)
 
-    # ---------- Results rendering (unchanged behavior) ----------
+    # --- Results rendering & actions (same behavior as before) ---
     def _on_results_ready(self, payload: dict):
         self._last_results = payload
         self._selected_paths.clear()
