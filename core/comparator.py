@@ -3,16 +3,11 @@ core/comparator.py
 
 Comparator using field-based exact matches and a single perceptual hash (phash).
 
-Hash computation is done in parallel with a per-file timeout to avoid a single
-bad file or very large file from blocking the entire search.
-
-Improvements in this version:
-- Parallel phash computation with per-file timeout and debug logging.
-- Correct Hamming-distance -> similarity calculation and conversion to
-  a max allowed Hamming distance for the selected similarity %.
-- Light bucketing by hash prefix when dataset is large to avoid full O(n*m)
-  comparisons (helps performance, keeps correctness).
-- Logs helpful debug lines so you can see hashing progress and counts.
+Changes in this version:
+- Do NOT run legacy metadata-based pair matching when hash-based matching is requested.
+  (Previously `metadata=True` caused images with identical dimensions/mode to all match.)
+- Added informative debug logs around hashing and matching decisions.
+- Keeps parallel phash computation and bucketing optimizations.
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -179,7 +174,6 @@ def _imagehash_to_int(h: imagehash.ImageHash) -> int:
     """Convert ImageHash.hash boolean array into an integer bitmask (flattened row-major)."""
     arr = getattr(h, "hash", None)
     if arr is None:
-        # fallback to string parse
         try:
             return int(str(h), 16)
         except Exception:
@@ -248,7 +242,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
     fields = criteria.get("fields") or []
     found_pairs = set()
 
-    # 1) Field-based exact
+    # 1) Field-based exact matches
     if fields:
         index: Dict[str, List] = {}
         for w in work_files:
@@ -271,8 +265,9 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                         matches.append((r, w, matched))
                         found_pairs.add(pair_key)
 
-    # 2) Legacy fallback if no fields
-    if not fields:
+    # 2) Legacy metadata/name/size fallback: only run when NOT using hashing and no explicit fields
+    if not fields and not criteria.get("hash"):
+        logger.debug("Running legacy fallback matching (metadata/name/size) because no fields and hash not requested")
         for r in ref_files:
             for w in work_files:
                 pair_key = (r.path, w.path)
@@ -288,6 +283,9 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                 if reasons:
                     matches.append((r, w, list(dict.fromkeys(reasons))))
                     found_pairs.add(pair_key)
+    else:
+        if not fields and criteria.get("hash"):
+            logger.debug("Skipping legacy metadata fallback because hash-based matching requested")
 
     # 3) Hash-based matching (phash only)
     if criteria.get("hash"):
@@ -297,9 +295,17 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
         work_paths = [f.path for f in work_files if getattr(f, "path", None)]
 
+        logger.debug("Starting hash-based matching: ref=%d work=%d hash_size=%d similarity=%s%%",
+                     len(ref_paths), len(work_paths), hash_size, similarity_threshold)
+
         # compute hashes in parallel with per-file timeout to avoid hangs
         ref_hashes = _compute_hashes_parallel(ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
         work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+
+        if not ref_hashes:
+            logger.warning("No reference hashes computed (0). Hash-based matching will yield no matches.")
+        if not work_hashes:
+            logger.warning("No work hashes computed (0). Hash-based matching will yield no matches.")
 
         try:
             unique_ref_hashes = len(set(str(h) for h in ref_hashes.values()))
@@ -310,13 +316,11 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
             pass
 
         # convert similarity% -> max Hamming distance allowed (integer)
-        # phash bit count = hash_size * hash_size
         num_bits = (hash_size * hash_size) if hash_size and isinstance(hash_size, int) else 64
         max_dist = int((1.0 - (similarity_threshold / 100.0)) * num_bits)
-        logger.debug("Using phash hash_size=%d (%d bits) similarity=%s%% -> max_hamming=%d", hash_size, num_bits, similarity_threshold, max_dist)
+        logger.debug("phash bits=%d similarity=%s%% -> max_hamming=%d", num_bits, similarity_threshold, max_dist)
 
-        # Optimization: if many files, bucket work hashes by prefix to avoid full O(n*m)
-        # prefix_bits chosen conservatively
+        # prepare integer forms for bucketing
         work_items = []
         for p, h in work_hashes.items():
             work_items.append((p, h, _imagehash_to_int(h)))
@@ -324,7 +328,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         for p, h in ref_hashes.items():
             ref_items.append((p, h, _imagehash_to_int(h)))
 
-        # choose prefix bits based on dataset size (reduce comparisons when >500 files)
+        # choose prefix_bits based on dataset size (reduce comparisons when many files)
         prefix_bits = 0
         total_work = len(work_items)
         if total_work > 500:
@@ -355,12 +359,14 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                 pair_key = (rp, wp)
                 if pair_key in found_pairs:
                     continue
-                # calculate hamming distance via ImageHash arrays (fast)
                 sim = _hash_similarity_percent(rh, wh)
                 if sim >= similarity_threshold:
-                    matches.append((next((f for f in ref_files if getattr(f, "path", None) == rp), None),
-                                    next((f for f in work_files if getattr(f, "path", None) == wp), None),
-                                    [f"hash({int(sim)}%)"]))
+                    # find objects by path
+                    r_obj = next((f for f in ref_files if getattr(f, "path", None) == rp), None)
+                    w_obj = next((f for f in work_files if getattr(f, "path", None) == wp), None)
+                    if r_obj is None or w_obj is None:
+                        continue
+                    matches.append((r_obj, w_obj, [f"hash({int(sim)}%)"]))
                     found_pairs.add(pair_key)
 
     return matches
