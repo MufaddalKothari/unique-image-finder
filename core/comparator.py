@@ -2,6 +2,9 @@
 core/comparator.py
 
 Comparator using field-based exact matches and a single perceptual hash (phash).
+
+Hash computation is done in parallel with a per-file timeout to avoid a single
+bad file or very large file from blocking the entire search.
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -9,6 +12,8 @@ from PIL import Image, ImageOps
 import imagehash
 import logging
 import os
+import concurrent.futures
+import functools
 
 logger = logging.getLogger(__name__)
 
@@ -106,50 +111,86 @@ def _match_metadata(a, b):
     return reasons
 
 
-def _compute_hashes_for_paths(paths: List[str], hash_size: int) -> Dict[str, imagehash.ImageHash]:
-    """
-    Compute phash for each path. Returns dict path->ImageHash.
-    """
-    func = imagehash.phash
-    hashes = {}
-    for p in paths:
+# ---------- Hash helpers (parallel safe with per-file timeout) ----------
+
+def _compute_phash_for_path(path: str, hash_size: int) -> Tuple[str, Any]:
+    """Compute phash for a single path. Returns (path, ImageHash) or raises."""
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(path)
+    with Image.open(path) as im:
         try:
-            if not p or not os.path.exists(p):
-                continue
-            with Image.open(p) as im:
+            im = ImageOps.exif_transpose(im)
+        except Exception:
+            # ignore orientation fix failure
+            pass
+        # convert to RGB for consistent hashing
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGB")
+        try:
+            # imagehash.phash accepts hash_size in recent versions
+            h = imagehash.phash(im, hash_size=hash_size)
+        except TypeError:
+            h = imagehash.phash(im)
+        return path, h
+
+
+def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int = None, per_file_timeout: float = 10.0) -> Dict[str, imagehash.ImageHash]:
+    """
+    Compute phash for each path in parallel. If a file's computation exceeds per_file_timeout
+    it will be skipped (and logged). Returns dict path->ImageHash for successful computations.
+    """
+    result = {}
+    if not paths:
+        return result
+
+    # sensible default: min(8, cpu_count * 2)
+    try:
+        cpu = os.cpu_count() or 2
+        default_workers = min(8, max(1, cpu))
+    except Exception:
+        default_workers = 4
+    max_workers = max_workers or default_workers
+
+    logger.debug("Starting parallel hash computation for %d files (workers=%d, timeout=%.1fs)", len(paths), max_workers, per_file_timeout)
+
+    # Use ThreadPoolExecutor because PIL + imagehash releases GIL partially and IO bound parts benefit.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        # schedule futures
+        futures = {ex.submit(_compute_phash_for_path, p, hash_size): p for p in paths}
+        for fut in concurrent.futures.as_completed(futures):
+            p = futures[fut]
+            try:
+                # allow per-file timeout at retrieval time
+                path, h = fut.result(timeout=per_file_timeout)
+                result[path] = h
+            except concurrent.futures.TimeoutError:
+                logger.warning("Hash computation timed out for %s (>%ss). Skipping.", p, per_file_timeout)
+                # cancel if still running
                 try:
-                    im = ImageOps.exif_transpose(im)
+                    fut.cancel()
                 except Exception:
                     pass
-                if im.mode not in ("RGB", "RGBA"):
-                    im = im.convert("RGB")
-                try:
-                    h = func(im, hash_size=hash_size)
-                except TypeError:
-                    h = func(im)
-                hashes[p] = h
-        except Exception as e:
-            logger.debug("Failed to compute hash for %s: %s", p, e)
-    return hashes
+            except Exception as e:
+                logger.debug("Hash computation failed for %s: %s", p, e)
+    logger.debug("Completed hashing: computed %d hashes (requested %d files)", len(result), len(paths))
+    return result
 
 
 def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -> float:
-    """
-    Compute similarity percent between two ImageHash objects using Hamming distance.
-    """
+    """Compute similarity percent between two ImageHash objects using Hamming distance."""
     if h1 is None or h2 is None:
         return 0.0
     try:
-        # pHash has h.hash as a numpy array; prefer that for robust distance computation
         arr1 = getattr(h1, "hash", None)
         arr2 = getattr(h2, "hash", None)
         if arr1 is not None and arr2 is not None:
+            # prefer numpy if available
             try:
                 import numpy as _np
                 dist = int(_np.count_nonzero(arr1 != arr2))
                 num_bits = int(arr1.size)
             except Exception:
-                # fallback pure python
+                # Python fallback
                 flat1 = list(arr1.flatten()) if hasattr(arr1, "flatten") else list(arr1)
                 flat2 = list(arr2.flatten()) if hasattr(arr2, "flatten") else list(arr2)
                 dist = sum(1 for a, b in zip(flat1, flat2) if a != b)
@@ -175,6 +216,8 @@ def _hash_similarity_percent(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -
             return 0.0
 
 
+# ---------- Main comparator functions ----------
+
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
     """
     Find duplicate pairs: field-exact matches and/or phash similarity.
@@ -186,7 +229,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
     fields = criteria.get("fields") or []
     found_pairs = set()
 
-    # Field-based exact
+    # 1) Field-based exact
     if fields:
         index = {}
         for w in work_files:
@@ -209,7 +252,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                         matches.append((r, w, matched))
                         found_pairs.add(pair_key)
 
-    # Legacy fallback if no fields
+    # 2) Legacy fallback if no fields
     if not fields:
         for r in ref_files:
             for w in work_files:
@@ -227,15 +270,17 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                     matches.append((r, w, list(dict.fromkeys(reasons))))
                     found_pairs.add(pair_key)
 
-    # Hash-based matching (phash only)
+    # 3) Hash-based matching (phash only)
     if criteria.get("hash"):
         hash_size = int(criteria.get("hash_size") or 8)
         similarity_threshold = float(criteria.get("similarity") or 90.0)
 
         ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
         work_paths = [f.path for f in work_files if getattr(f, "path", None)]
-        ref_hashes = _compute_hashes_for_paths(ref_paths, hash_size)
-        work_hashes = _compute_hashes_for_paths(work_paths, hash_size)
+
+        # compute hashes in parallel with per-file timeout to avoid hangs
+        ref_hashes = _compute_hashes_parallel(ref_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
+        work_hashes = _compute_hashes_parallel(work_paths, hash_size, max_workers=min(8, (os.cpu_count() or 4)), per_file_timeout=8.0)
 
         try:
             unique_ref_hashes = len(set(str(h) for h in ref_hashes.values()))
@@ -245,6 +290,7 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         except Exception:
             pass
 
+        # pairwise compare (O(n*m)); if you have many files we can optimize with buckets
         for r in ref_files:
             rh = ref_hashes.get(r.path)
             if rh is None:
