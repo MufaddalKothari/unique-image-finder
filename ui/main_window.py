@@ -772,8 +772,8 @@ class MainWindow(QWidget):
         self._update_selected_count()
         if errors:
             QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
-            else:
-                QMessageBox.information(self, "Done", "Selected files moved to Trash.")
+        else:
+            QMessageBox.information(self, "Done", "Selected files moved to Trash.")
 
     def _clear_results(self):
         # kept for compatibility, clear all tabs
