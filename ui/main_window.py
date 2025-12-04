@@ -1,6 +1,15 @@
 # ui/main_window.py
-# Updated UI: removed hash-size input (hash_size is permanently 16).
-# Only similarity slider remains. The comparator will default to 16.
+# Updated UI:
+# - Removed the two "Find Uniques (Reference/Working)" checkboxes.
+# - Added a QTabWidget in the centre results area with three tabs:
+#     * Duplicates
+#     * Uniques (Reference)
+#     * Uniques (Working)
+# - After a search, duplicates and uniques are computed once and stored in self._last_results.
+#   Switching tabs simply shows the already-computed results (no recompute).
+#
+# Note: this file overwrites the previous ui/main_window.py. It reuses the same helper
+# functions for creating duplicate/unique widgets but directs output into per-tab containers.
 
 import os
 import shutil
@@ -9,7 +18,8 @@ from typing import List
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QGroupBox, QFileDialog, QCheckBox, QProgressBar, QScrollArea,
-    QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider
+    QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider,
+    QTabWidget
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QPixmap
@@ -165,10 +175,6 @@ class MainWindow(QWidget):
         self.field_selector_btn.setMenu(self.field_menu)
         self.field_selector_btn.setStyleSheet("QToolButton { padding: 10px 14px; font-weight:600; }")
 
-        # Find uniques checkboxes (separate for Reference and Working)
-        self.find_uniques_ref_cb = QCheckBox("Find Uniques (Reference)")
-        self.find_uniques_work_cb = QCheckBox("Find Uniques (Working)")
-
         # Hash checkbox + similarity slider (hash_size removed; permanently 16)
         self.hash_cb = QCheckBox("By Hash (dhash, size=16)")
         self.hash_cb.stateChanged.connect(self._on_hash_toggled)
@@ -191,11 +197,7 @@ class MainWindow(QWidget):
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
         opts_layout.addWidget(self.field_selector_btn)
-        # place both unique checkboxes together
-        uniq_box = QHBoxLayout()
-        uniq_box.addWidget(self.find_uniques_ref_cb)
-        uniq_box.addWidget(self.find_uniques_work_cb)
-        opts_layout.addLayout(uniq_box)
+        # Removed unique checkboxes here - tabs will show duplicates/uniques
         opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
         opts_layout.addWidget(self.sim_lbl)
@@ -220,14 +222,36 @@ class MainWindow(QWidget):
         act_layout.addWidget(self.progress)
         layout.addLayout(act_layout)
 
-        # Results area
-        self.results_area = QScrollArea()
-        self.results_area.setWidgetResizable(True)
-        layout.addWidget(self.results_area)
-        self.results_container = QWidget()
-        self.results_layout = QVBoxLayout(self.results_container)
-        self.results_layout.setAlignment(Qt.AlignTop)
-        self.results_area.setWidget(self.results_container)
+        # Results area -> Tabs: Duplicates | Uniques (Reference) | Uniques (Working)
+        self.tabs = QTabWidget()
+        # Duplicates tab
+        self.duplicates_container = QWidget()
+        self.duplicates_layout = QVBoxLayout(self.duplicates_container)
+        self.duplicates_layout.setAlignment(Qt.AlignTop)
+        self.duplicates_scroll = QScrollArea()
+        self.duplicates_scroll.setWidgetResizable(True)
+        self.duplicates_scroll.setWidget(self.duplicates_container)
+        self.tabs.addTab(self.duplicates_scroll, "Duplicates")
+
+        # Uniques (Reference) tab
+        self.uniques_ref_container = QWidget()
+        self.uniques_ref_layout = QVBoxLayout(self.uniques_ref_container)
+        self.uniques_ref_layout.setAlignment(Qt.AlignTop)
+        self.uniques_ref_scroll = QScrollArea()
+        self.uniques_ref_scroll.setWidgetResizable(True)
+        self.uniques_ref_scroll.setWidget(self.uniques_ref_container)
+        self.tabs.addTab(self.uniques_ref_scroll, "Uniques (Reference)")
+
+        # Uniques (Working) tab
+        self.uniques_work_container = QWidget()
+        self.uniques_work_layout = QVBoxLayout(self.uniques_work_container)
+        self.uniques_work_layout.setAlignment(Qt.AlignTop)
+        self.uniques_work_scroll = QScrollArea()
+        self.uniques_work_scroll.setWidgetResizable(True)
+        self.uniques_work_scroll.setWidget(self.uniques_work_container)
+        self.tabs.addTab(self.uniques_work_scroll, "Uniques (Working)")
+
+        layout.addWidget(self.tabs)
 
         # Footer
         footer_sep = QFrame()
@@ -237,7 +261,9 @@ class MainWindow(QWidget):
 
         bulk_layout = QHBoxLayout()
         self.delete_btn = QPushButton("🗑️ Delete All Duplicates")
+        self.delete_btn.setProperty("class", "glass")
         self.keep_btn = QPushButton("✅ Keep All Duplicates")
+        self.keep_btn.setProperty("class", "glass")
         self.save_uniques_btn = QPushButton("💾 Save Uniques to New Directory")
 
         self.move_btn = QToolButton()
@@ -330,8 +356,9 @@ class MainWindow(QWidget):
         ref = self.ref_dir.text().strip()
         work = self.work_dir.text().strip()
         if not ref or not work:
-            self._clear_results()
-            self.results_layout.addWidget(QLabel("Please select both reference and working directories."))
+            # Clear tabs and show message in Duplicates tab
+            self._clear_all_tabs()
+            self._add_label_to_layout(self.duplicates_layout, "Please select both reference and working directories.")
             return
 
         fields = self._get_selected_fields()
@@ -339,20 +366,16 @@ class MainWindow(QWidget):
             "fields": fields,
             "size": False,
             "name": False,
-            # keep metadata True for non-hash searches; comparator ignores it when hashing
-            "metadata": True,
+            "metadata": True,  # comparator ignores metadata fallback when hashing is requested
             "hash": self.hash_cb.isChecked(),
-            # don't send hash_size (comparator now uses permanent DEFAULT_HASH_SIZE)
+            "hash_size": None,  # comparator will use DEFAULT_HASH_SIZE (16) permanently
             "similarity": int(self.sim_slider.value()) if self.hash_cb.isChecked() else None,
-            # new flags for selective unique searches
-            "find_uniques_ref": bool(self.find_uniques_ref_cb.isChecked()),
-            "find_uniques_work": bool(self.find_uniques_work_cb.isChecked())
         }
 
         logger.debug("MainWindow: starting search with criteria: %s", criteria)
 
         self.search_btn.setEnabled(False)
-        self._clear_results()
+        self._clear_all_tabs()
         self.progress.setValue(0)
 
         self._thread = SearchThread(ref, work, criteria)
@@ -364,8 +387,9 @@ class MainWindow(QWidget):
     def _on_progress(self, value: int):
         self.progress.setValue(value)
 
-    # --- Results rendering & actions ---
+    # --- Results rendering & actions (now tab-aware) ---
     def _on_results_ready(self, payload: dict):
+        # payload contains duplicates, unique_in_ref, unique_in_work and criteria
         self._last_results = payload
         self._selected_paths.clear()
         self._update_selected_count()
@@ -373,52 +397,50 @@ class MainWindow(QWidget):
         duplicates = payload.get("duplicates", [])
         unique_in_ref = payload.get("unique_in_ref", [])
         unique_in_work = payload.get("unique_in_work", [])
-        criteria = payload.get("criteria", {})
 
-        # If either selective unique flag is set, show only uniques from selected side(s)
-        show_ref_uniques = bool(criteria.get("find_uniques_ref"))
-        show_work_uniques = bool(criteria.get("find_uniques_work"))
-
-        if show_ref_uniques or show_work_uniques:
-            header = QLabel("<b>Uniques</b>")
-            self.results_layout.addWidget(header)
-            if show_ref_uniques:
-                if unique_in_ref:
-                    self.results_layout.addWidget(QLabel("<i>Only in Reference</i>"))
-                    for f in unique_in_ref:
-                        self._add_unique_widget(f, side="ref")
-                else:
-                    self.results_layout.addWidget(QLabel("<i>No unique files found in Reference</i>"))
-            if show_work_uniques:
-                if unique_in_work:
-                    self.results_layout.addWidget(QLabel("<i>Only in Working</i>"))
-                    for f in unique_in_work:
-                        self._add_unique_widget(f, side="work")
-                else:
-                    self.results_layout.addWidget(QLabel("<i>No unique files found in Working</i>"))
-            # Do not show duplicates when selective uniques requested
-            return
-
-        # Default behavior (no selective unique requested): show duplicates and uniques
+        # Populate tabs once (no recompute on tab switch)
+        self._clear_all_tabs()
         if duplicates:
-            header = QLabel("<b>Duplicates / Matches</b>")
-            self.results_layout.addWidget(header)
+            self._add_label_to_layout(self.duplicates_layout, "<b>Duplicates / Matches</b>")
             for (r, w, reasons) in duplicates:
-                self._add_duplicate_widget(r, w, reasons)
+                self._add_duplicate_widget_to_layout(self.duplicates_layout, r, w, reasons)
+        else:
+            self._add_label_to_layout(self.duplicates_layout, "No duplicates found.")
 
-        if unique_in_ref or unique_in_work:
-            header = QLabel("<b>Uniques</b>")
-            self.results_layout.addWidget(header)
-            if unique_in_ref:
-                self.results_layout.addWidget(QLabel("<i>Only in Reference</i>"))
-                for f in unique_in_ref:
-                    self._add_unique_widget(f, side="ref")
-            if unique_in_work:
-                self.results_layout.addWidget(QLabel("<i>Only in Working</i>"))
-                for f in unique_in_work:
-                    self._add_unique_widget(f, side="work")
+        # Uniques (Reference)
+        self._add_label_to_layout(self.uniques_ref_layout, "<b>Uniques (Reference)</b>")
+        if unique_in_ref:
+            for f in unique_in_ref:
+                self._add_unique_widget_to_layout(self.uniques_ref_layout, f, side="ref")
+        else:
+            self._add_label_to_layout(self.uniques_ref_layout, "<i>No unique files found in Reference</i>")
 
-    def _add_duplicate_widget(self, r: ImageFileObj, w: ImageFileObj, reasons: List[str]):
+        # Uniques (Working)
+        self._add_label_to_layout(self.uniques_work_layout, "<b>Uniques (Working)</b>")
+        if unique_in_work:
+            for f in unique_in_work:
+                self._add_unique_widget_to_layout(self.uniques_work_layout, f, side="work")
+        else:
+            self._add_label_to_layout(self.uniques_work_layout, "<i>No unique files found in Working</i>")
+
+        # Select first tab by default (duplicates)
+        self.tabs.setCurrentIndex(0)
+
+    # Helpers to manage tab contents
+    def _clear_all_tabs(self):
+        for layout in (self.duplicates_layout, self.uniques_ref_layout, self.uniques_work_layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+    def _add_label_to_layout(self, layout, text):
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+    def _add_duplicate_widget_to_layout(self, layout, r: ImageFileObj, w: ImageFileObj, reasons: List[str]):
         row = QFrame()
         row.setFrameShape(QFrame.StyledPanel)
         row_layout = QHBoxLayout(row)
@@ -447,9 +469,9 @@ class MainWindow(QWidget):
         row_layout.addWidget(thumb_w)
         row_layout.addWidget(info_lbl)
         row_layout.addWidget(compare_btn)
-        self.results_layout.addWidget(row)
+        layout.addWidget(row)
 
-    def _add_unique_widget(self, f: ImageFileObj, side: str = "ref"):
+    def _add_unique_widget_to_layout(self, layout, f: ImageFileObj, side: str = "ref"):
         row = QFrame()
         row.setFrameShape(QFrame.StyledPanel)
         row_layout = QHBoxLayout(row)
@@ -469,7 +491,7 @@ class MainWindow(QWidget):
         row_layout.addWidget(thumb)
         row_layout.addWidget(info_lbl)
         row_layout.addWidget(open_btn)
-        self.results_layout.addWidget(row)
+        layout.addWidget(row)
 
     def _on_path_toggled(self, path: str, state):
         if state == Qt.Checked:
@@ -534,27 +556,29 @@ class MainWindow(QWidget):
 
     def _remove_widgets_for_paths(self, paths: List[str]):
         path_set = set(paths)
-        i = 0
-        while i < self.results_layout.count():
-            item = self.results_layout.itemAt(i)
-            widget = item.widget()
-            should_remove = False
-            if widget:
-                labels = widget.findChildren(QLabel)
-                for lbl in labels:
-                    txt = lbl.text() or ""
-                    for p in path_set:
-                        if p in txt:
-                            should_remove = True
+        # remove from all tabs
+        for layout in (self.duplicates_layout, self.uniques_ref_layout, self.uniques_work_layout):
+            i = 0
+            while i < layout.count():
+                item = layout.itemAt(i)
+                widget = item.widget()
+                should_remove = False
+                if widget:
+                    labels = widget.findChildren(QLabel)
+                    for lbl in labels:
+                        txt = lbl.text() or ""
+                        for p in path_set:
+                            if p in txt:
+                                should_remove = True
+                                break
+                        if should_remove:
                             break
-                    if should_remove:
-                        break
-            if should_remove:
-                w = self.results_layout.takeAt(i).widget()
-                if w is not None:
-                    w.deleteLater()
-            else:
-                i += 1
+                if should_remove:
+                    w = layout.takeAt(i).widget()
+                    if w is not None:
+                        w.deleteLater()
+                else:
+                    i += 1
 
     def _on_delete_all_duplicates(self):
         if not self._last_results:
@@ -609,6 +633,52 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "No results", "No search results available. Run a search first.")
             return
 
+        unique_in_ref = self._last_results.get("unique_in_ref", [])
+        unique_in_work = self._last_results.get("unique_in_work", [])
+
+        if not unique_in_ref and not unique_in_work:
+            QMessageBox.information(self, "No uniques", "No unique files found to save.")
+            return
+
+        dlg = QFileDialog(self, caption="Select destination folder")
+        dlg.setFileMode(QFileDialog.Directory)
+        if not dlg.exec_():
+            return
+        dest_dir = dlg.selectedFiles()[0]
+        dest_path = Path(dest_dir)
+
+        errors = []
+        def _copy_list(files, subfolder_name):
+            if not files:
+                return
+            folder = dest_path / subfolder_name
+            folder.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                src = Path(f.path)
+                if not src.exists():
+                    errors.append((str(src), "Source not found"))
+                    continue
+                dest_file = folder / src.name
+                counter = 1
+                base = dest_file.stem
+                suffix = dest_file.suffix
+                while dest_file.exists():
+                    dest_file = folder / f"{base}_{counter}{suffix}"
+                    counter += 1
+                try:
+                    shutil.copy2(str(src), str(dest_file))
+                except Exception as e:
+                    errors.append((str(src), str(e)))
+
+        _copy_list(unique_in_ref, "reference_uniques")
+        _copy_list(unique_in_work, "working_uniques")
+
+        if errors:
+            msg = "Some files could not be copied:\n" + "\n".join([f"{p}: {err}" for p, err in errors])
+            QMessageBox.warning(self, "Copy errors", msg)
+        else:
+            QMessageBox.information(self, "Done", f"Unique files copied to:\n{dest_path}")
+
     def _on_move_selected(self):
         if not self._selected_paths:
             QMessageBox.information(self, "No selection", "No files selected to move.")
@@ -657,11 +727,8 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Done", "Selected files moved to Trash.")
 
     def _clear_results(self):
-        while self.results_layout.count():
-            item = self.results_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+        # kept for compatibility, clear all tabs
+        self._clear_all_tabs()
 
     def _on_search_finished(self):
         self.search_btn.setEnabled(True)
