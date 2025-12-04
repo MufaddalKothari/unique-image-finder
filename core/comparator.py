@@ -1,13 +1,14 @@
 """
 core/comparator.py
 
-Comparator using dhash (difference hash) as the single perceptual-hash algorithm.
+DHash comparator with HashStore caching and a small in-memory hash cache to avoid
+recomputing the same work hashes twice during a single search.
 
-Changes in this version:
-- DEFAULT_HASH_SIZE = 16 permanently.
-- Use ProcessPoolExecutor for hash computation (faster for CPU-heavy PIL work) with fallback to ThreadPoolExecutor.
-- Added additional debug logging to show cache hits/misses and computed counts.
-- Keeps the SQLite HashStore usage (reads cached reference hashes, computes & stores missing ref hashes).
+Changes in this patch:
+- Introduced a transient in-memory hash cache (_hash_cache) keyed by (tuple(ref_paths), tuple(work_paths), hash_size, similarity)
+  so find_duplicates() stores computed ref/work hashes and find_uniques() can reuse them without recomputing.
+- Improved logging to indicate cache reuse.
+- Behavior otherwise unchanged (still uses HashStore for reference caching).
 """
 from typing import List, Tuple, Dict, Any
 from datetime import datetime
@@ -23,9 +24,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HASH_SIZE = 16  # permanent default
 
+# Transient in-memory cache for the duration of a single search run in the process.
+# Key: (tuple(ref_paths), tuple(work_paths), hash_size, similarity)
+# Value: (ref_hashes_dict, work_hashes_dict)
+_hash_cache: Dict[Tuple, Tuple[Dict[str, imagehash.ImageHash], Dict[str, imagehash.ImageHash]]] = {}
+
 
 def _get_field_value(f, field_name):
-    """Return a normalized value for the given field on ImageFileObj f."""
     val = None
     if field_name == "name":
         val = getattr(f, "name", None)
@@ -74,7 +79,6 @@ def _build_key(f, fields: List[str]):
 
 
 def _match_metadata(a, b):
-    """Local metadata matching fallback."""
     reasons = []
     if getattr(a, "dimensions", None) and getattr(b, "dimensions", None) and a.dimensions == b.dimensions:
         reasons.append("dimensions")
@@ -184,8 +188,9 @@ def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int 
     # If process approach failed or partially failed, fall back to threads for remaining items
     if not use_processes:
         try:
+            remaining = [p for p in paths if p not in result]
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {ex.submit(_compute_dhash_for_path, p, hash_size): p for p in paths if p not in result}
+                futures = {ex.submit(_compute_dhash_for_path, p, hash_size): p for p in remaining}
                 for fut in concurrent.futures.as_completed(futures):
                     p = futures[fut]
                     try:
@@ -207,7 +212,6 @@ def _compute_hashes_parallel(paths: List[str], hash_size: int, max_workers: int 
 
 
 def _imagehash_to_int(h: imagehash.ImageHash) -> int:
-    """Convert ImageHash.hash boolean array into an integer bitmask (flattened row-major)."""
     arr = getattr(h, "hash", None)
     if arr is None:
         try:
@@ -222,7 +226,6 @@ def _imagehash_to_int(h: imagehash.ImageHash) -> int:
 
 
 def _hash_hamming_distance(h1: imagehash.ImageHash, h2: imagehash.ImageHash) -> int:
-    """Return Hamming distance (integer) between two ImageHash objects."""
     try:
         arr1 = getattr(h1, "hash", None)
         arr2 = getattr(h2, "hash", None)
@@ -252,10 +255,15 @@ def _hash_similarity_percent_from_distance(dist: int, num_bits: int) -> float:
 
 # ---------- Main comparator functions ----------
 
+def _make_hash_key(ref_paths: List[str], work_paths: List[str], hash_size: int, similarity: float):
+    # create a stable key for the in-memory cache; keep it reasonably compact
+    return (tuple(ref_paths), tuple(work_paths), int(hash_size), float(similarity))
+
+
 def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any]) -> List[Tuple]:
     """
     Find duplicate pairs: field-exact matches and/or dhash similarity.
-    Returns list of tuples: (ref_file_obj, work_file_obj, [matched_reasons])
+    Stores computed ref/work hashes into the transient _hash_cache for reuse.
     """
     matches = []
     if not ref_files or not work_files:
@@ -309,10 +317,9 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         if not fields and criteria.get("hash"):
             logger.debug("Skipping legacy fallback because hash-based matching requested")
 
-    # 3) Hash-based matching (dhash only), using HashStore for reference files
+    # 3) Hash-based matching (dhash only), using HashStore for reference files.
     if criteria.get("hash"):
-        # use provided similarity or default; do NOT accept hash_size from UI (DEFAULT_HASH_SIZE used)
-        hash_size = DEFAULT_HASH_SIZE
+        hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
         similarity_threshold = float(criteria.get("similarity") or 90.0)
 
         ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
@@ -321,30 +328,44 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
         logger.debug("Starting dhash matching: ref=%d work=%d hash_size=%d similarity=%s%%",
                      len(ref_paths), len(work_paths), hash_size, similarity_threshold)
 
-        store = HashStore()
-
-        # fetch cached ref hashes
-        cached_ref_hashes = store.bulk_get(ref_paths, hash_size) if ref_paths else {}
-        logger.debug("HashStore: cache hits=%d for reference files", len(cached_ref_hashes))
-
-        # compute missing ref hashes and persist
-        missing_ref = [p for p in ref_paths if p not in cached_ref_hashes]
-        computed_ref = _compute_hashes_parallel(missing_ref, hash_size) if missing_ref else {}
-        logger.debug("Computed %d missing reference hashes", len(computed_ref))
-        for p, h in computed_ref.items():
+        # Build cache key and check transient in-memory cache first
+        key = _make_hash_key(ref_paths, work_paths, hash_size, similarity_threshold)
+        if key in _hash_cache:
+            ref_hashes, work_hashes = _hash_cache[key]
+            logger.debug("Using transient in-memory hash cache for this search (ref=%d, work=%d)", len(ref_hashes), len(work_hashes))
+        else:
+            store = HashStore()
             try:
-                store.set(p, h, hash_size)
-            except Exception:
-                logger.debug("Failed to store hash for %s", p)
+                # fetch cached ref hashes
+                cached_ref_hashes = store.bulk_get(ref_paths, hash_size) if ref_paths else {}
+                logger.debug("HashStore: cache hits=%d for reference files", len(cached_ref_hashes))
 
-        # combine
-        ref_hashes = {}
-        ref_hashes.update(cached_ref_hashes)
-        ref_hashes.update(computed_ref)
+                # compute missing ref hashes and persist
+                missing_ref = [p for p in ref_paths if p not in cached_ref_hashes]
+                computed_ref = _compute_hashes_parallel(missing_ref, hash_size) if missing_ref else {}
+                logger.debug("Computed %d missing reference hashes", len(computed_ref))
+                for p, h in computed_ref.items():
+                    try:
+                        store.set(p, h, hash_size)
+                    except Exception:
+                        logger.debug("Failed to store hash for %s", p)
 
-        # compute work hashes on-the-fly
-        work_hashes = _compute_hashes_parallel(work_paths, hash_size) if work_paths else {}
-        logger.debug("Computed %d work hashes", len(work_hashes))
+                # combine
+                ref_hashes = {}
+                ref_hashes.update(cached_ref_hashes)
+                ref_hashes.update(computed_ref)
+
+                # compute work hashes on-the-fly (do NOT store)
+                work_hashes = _compute_hashes_parallel(work_paths, hash_size) if work_paths else {}
+                logger.debug("Computed %d work hashes", len(work_hashes))
+            finally:
+                try:
+                    store.close()
+                except Exception:
+                    pass
+
+            # store in transient cache for reuse by find_uniques later in the same search
+            _hash_cache[key] = (ref_hashes, work_hashes)
 
         if not ref_hashes:
             logger.warning("No reference hashes computed (0). Hash-based matching will yield no matches.")
@@ -407,11 +428,6 @@ def find_duplicates(ref_files: List, work_files: List, criteria: Dict[str, Any])
                     matches.append((r_obj, w_obj, [f"dhash({int(sim)}%)"]))
                     found_pairs.add(pair_key)
 
-        try:
-            store.close()
-        except Exception:
-            pass
-
     return matches
 
 
@@ -419,37 +435,44 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]):
     """
     Return unique_in_ref, unique_in_work.
 
-    Behavior:
-    - If hash-based matching is requested, compute duplicate pairs using the same dhash logic
-      and then return uniques as the images not participating in any duplicate pair.
-    - Otherwise, fall back to the field/legacy uniqueness behavior.
+    Uses the transient _hash_cache if available to avoid recomputing hashes.
     """
     try:
         fields = criteria.get("fields") or []
 
-        # If hashing requested: compute duplicate participants and invert
         if criteria.get("hash"):
-            logger.debug("find_uniques: hash-based unique detection requested; computing duplicates to invert")
-            hash_size = DEFAULT_HASH_SIZE
+            logger.debug("find_uniques: hash-based unique detection requested; attempting to reuse computed hashes")
+            hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
             similarity_threshold = float(criteria.get("similarity") or 90.0)
 
             ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
             work_paths = [f.path for f in work_files if getattr(f, "path", None)]
 
-            store = HashStore()
-            cached_ref_hashes = store.bulk_get(ref_paths, hash_size) if ref_paths else {}
-            missing_ref = [p for p in ref_paths if p not in cached_ref_hashes]
-            computed_ref = _compute_hashes_parallel(missing_ref, hash_size) if missing_ref else {}
-            for p, h in computed_ref.items():
+            key = _make_hash_key(ref_paths, work_paths, hash_size, similarity_threshold)
+            if key in _hash_cache:
+                ref_hashes, work_hashes = _hash_cache[key]
+                logger.debug("Reusing transient in-memory hash cache (ref=%d, work=%d)", len(ref_hashes), len(work_hashes))
+            else:
+                # fallback: compute hashes (same as earlier)
+                store = HashStore()
                 try:
-                    store.set(p, h, hash_size)
-                except Exception:
-                    logger.debug("Failed to store hash for %s", p)
-            ref_hashes = {}
-            ref_hashes.update(cached_ref_hashes)
-            ref_hashes.update(computed_ref)
-
-            work_hashes = _compute_hashes_parallel(work_paths, hash_size) if work_paths else {}
+                    cached_ref_hashes = store.bulk_get(ref_paths, hash_size) if ref_paths else {}
+                    missing_ref = [p for p in ref_paths if p not in cached_ref_hashes]
+                    computed_ref = _compute_hashes_parallel(missing_ref, hash_size) if missing_ref else {}
+                    for p, h in computed_ref.items():
+                        try:
+                            store.set(p, h, hash_size)
+                        except Exception:
+                            logger.debug("Failed to store hash for %s", p)
+                    ref_hashes = {}
+                    ref_hashes.update(cached_ref_hashes)
+                    ref_hashes.update(computed_ref)
+                finally:
+                    try:
+                        store.close()
+                    except Exception:
+                        pass
+                work_hashes = _compute_hashes_parallel(work_paths, hash_size) if work_paths else {}
 
             num_bits = (hash_size * hash_size) if hash_size and isinstance(hash_size, int) else 64
             max_dist = int((1.0 - (similarity_threshold / 100.0)) * num_bits)
@@ -457,7 +480,7 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]):
             matched_ref_paths = set()
             matched_work_paths = set()
 
-            # pairwise compare (or use bucketing)
+            # pairwise compare using already computed hashes
             work_items = [(p, h, _imagehash_to_int(h)) for p, h in work_hashes.items()]
             ref_items = [(p, h, _imagehash_to_int(h)) for p, h in ref_hashes.items()]
 
@@ -477,14 +500,16 @@ def find_uniques(ref_files: List, work_files: List, criteria: Dict[str, Any]):
             logger.debug("find_uniques (hash): matched_ref=%d matched_work=%d unique_ref=%d unique_work=%d",
                          len(matched_ref_paths), len(matched_work_paths), len(unique_in_ref), len(unique_in_work))
 
-            try:
-                store.close()
-            except Exception:
-                pass
+            # Optionally clear the transient cache for this key to free memory
+            if key in _hash_cache:
+                try:
+                    del _hash_cache[key]
+                except Exception:
+                    pass
 
             return unique_in_ref, unique_in_work
 
-        # Non-hash path: use fields or legacy behavior
+        # Non-hash path: existing behavior
         def key(f):
             if not fields:
                 parts = []
