@@ -1,9 +1,6 @@
 # ui/main_window.py
-# Full main window updated:
-# - Two "Find Uniques" checkboxes: one for Reference, one for Working.
-# - When either is checked, only uniques from the checked side(s) are displayed (duplicates suppressed).
-# - Preserves hash-vs-fields mutual exclusion and slider-based hash settings.
-# - Glassy/off-white themed larger controls and soft separators applied.
+# Updated UI: removed hash-size input (hash_size is permanently 16).
+# Only similarity slider remains. The comparator will default to 16.
 
 import os
 import shutil
@@ -26,7 +23,6 @@ from send2trash import send2trash
 import logging
 
 logger = logging.getLogger(__name__)
-
 
 # UI style constants
 BUTTON_GLASS_STYLE = """
@@ -173,18 +169,9 @@ class MainWindow(QWidget):
         self.find_uniques_ref_cb = QCheckBox("Find Uniques (Reference)")
         self.find_uniques_work_cb = QCheckBox("Find Uniques (Working)")
 
-        # Hash checkbox + slider for similarity
-        self.hash_cb = QCheckBox("By Hash (phash only)")
+        # Hash checkbox + similarity slider (hash_size removed; permanently 16)
+        self.hash_cb = QCheckBox("By Hash (dhash, size=16)")
         self.hash_cb.stateChanged.connect(self._on_hash_toggled)
-        self.hash_size_slider = QSlider(Qt.Horizontal)
-        self.hash_size_slider.setMinimum(4)
-        self.hash_size_slider.setMaximum(16)
-        self.hash_size_slider.setValue(8)
-        self.hash_size_slider.setTickInterval(1)
-        self.hash_size_slider.setTickPosition(QSlider.TicksBelow)
-        self.hash_size_slider.setFixedWidth(160)
-        self.hash_size_slider.setObjectName("hash_size_slider")
-        self.hash_size_lbl = QLabel("Hash size: 8")
 
         # similarity slider and label
         self.sim_slider = QSlider(Qt.Horizontal)
@@ -203,9 +190,6 @@ class MainWindow(QWidget):
         self.hash_info_btn.setAutoRaise(True)
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
-        # wire hash size slider label
-        self.hash_size_slider.valueChanged.connect(lambda v: self.hash_size_lbl.setText(f"Hash size: {v}"))
-
         opts_layout.addWidget(self.field_selector_btn)
         # place both unique checkboxes together
         uniq_box = QHBoxLayout()
@@ -214,8 +198,6 @@ class MainWindow(QWidget):
         opts_layout.addLayout(uniq_box)
         opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
-        opts_layout.addWidget(self.hash_size_lbl)
-        opts_layout.addWidget(self.hash_size_slider)
         opts_layout.addWidget(self.sim_lbl)
         opts_layout.addWidget(self.sim_slider)
         opts_layout.addWidget(self.hash_info_btn)
@@ -322,7 +304,6 @@ class MainWindow(QWidget):
         any_checked = any(act.isChecked() for act in self.field_actions.values())
         # disable hash controls when fields are selected
         self.hash_cb.setEnabled(not any_checked)
-        self.hash_size_slider.setEnabled(not any_checked)
         self.sim_slider.setEnabled(not any_checked)
         self.hash_info_btn.setEnabled(not any_checked)
         if any_checked and self.hash_cb.isChecked():
@@ -358,9 +339,10 @@ class MainWindow(QWidget):
             "fields": fields,
             "size": False,
             "name": False,
+            # keep metadata True for non-hash searches; comparator ignores it when hashing
             "metadata": True,
             "hash": self.hash_cb.isChecked(),
-            "hash_size": int(self.hash_size_slider.value()) if self.hash_cb.isChecked() else None,
+            # don't send hash_size (comparator now uses permanent DEFAULT_HASH_SIZE)
             "similarity": int(self.sim_slider.value()) if self.hash_cb.isChecked() else None,
             # new flags for selective unique searches
             "find_uniques_ref": bool(self.find_uniques_ref_cb.isChecked()),
@@ -626,52 +608,6 @@ class MainWindow(QWidget):
         if not self._last_results:
             QMessageBox.information(self, "No results", "No search results available. Run a search first.")
             return
-
-        unique_in_ref = self._last_results.get("unique_in_ref", [])
-        unique_in_work = self._last_results.get("unique_in_work", [])
-
-        if not unique_in_ref and not unique_in_work:
-            QMessageBox.information(self, "No uniques", "No unique files found to save.")
-            return
-
-        dlg = QFileDialog(self, caption="Select destination folder")
-        dlg.setFileMode(QFileDialog.Directory)
-        if not dlg.exec_():
-            return
-        dest_dir = dlg.selectedFiles()[0]
-        dest_path = Path(dest_dir)
-
-        errors = []
-        def _copy_list(files, subfolder_name):
-            if not files:
-                return
-            folder = dest_path / subfolder_name
-            folder.mkdir(parents=True, exist_ok=True)
-            for f in files:
-                src = Path(f.path)
-                if not src.exists():
-                    errors.append((str(src), "Source not found"))
-                    continue
-                dest_file = folder / src.name
-                counter = 1
-                base = dest_file.stem
-                suffix = dest_file.suffix
-                while dest_file.exists():
-                    dest_file = folder / f"{base}_{counter}{suffix}"
-                    counter += 1
-                try:
-                    shutil.copy2(str(src), str(dest_file))
-                except Exception as e:
-                    errors.append((str(src), str(e)))
-
-        _copy_list(unique_in_ref, "reference_uniques")
-        _copy_list(unique_in_work, "working_uniques")
-
-        if errors:
-            msg = "Some files could not be copied:\n" + "\n".join([f"{p}: {err}" for p, err in errors])
-            QMessageBox.warning(self, "Copy errors", msg)
-        else:
-            QMessageBox.information(self, "Done", f"Unique files copied to:\n{dest_path}")
 
     def _on_move_selected(self):
         if not self._selected_paths:
