@@ -1,15 +1,12 @@
 # ui/main_window.py
 # Updated UI:
-# - Removed the two "Find Uniques (Reference/Working)" checkboxes.
-# - Added a QTabWidget in the centre results area with three tabs:
-#     * Duplicates
-#     * Uniques (Reference)
-#     * Uniques (Working)
-# - After a search, duplicates and uniques are computed once and stored in self._last_results.
-#   Switching tabs simply shows the already-computed results (no recompute).
+# - Tabs in the center area have an improved glassy/white look, thicker tab appearance,
+#   and they span the available center area.
+# - Scroll areas and containers are sized to expand to fill the tab content region.
+# - Styling kept conservative to remain compatible with existing GLASSY_STYLE.
 #
-# Note: this file overwrites the previous ui/main_window.py. It reuses the same helper
-# functions for creating duplicate/unique widgets but directs output into per-tab containers.
+# Overwrites the previous ui/main_window.py. Only visual/stylesheet changes were applied
+# to the tab widget and result containers; behavior remains the same.
 
 import os
 import shutil
@@ -109,6 +106,8 @@ class MainWindow(QWidget):
             self.setStyleSheet(BUTTON_GLASS_STYLE)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         # Header
         header = QLabel("🖼️ Unique Image Finder")
@@ -197,7 +196,6 @@ class MainWindow(QWidget):
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
         opts_layout.addWidget(self.field_selector_btn)
-        # Removed unique checkboxes here - tabs will show duplicates/uniques
         opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
         opts_layout.addWidget(self.sim_lbl)
@@ -224,12 +222,54 @@ class MainWindow(QWidget):
 
         # Results area -> Tabs: Duplicates | Uniques (Reference) | Uniques (Working)
         self.tabs = QTabWidget()
+        # Make the tabs fill the center area and expand
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tabs.setContentsMargins(0, 0, 0, 0)
+
+        # Improved glassy tab styling (thicker tabs, white/glassy look)
+        tab_style = """
+        QTabWidget::pane {
+            background: rgba(255,255,255,0.06);
+            border-radius: 12px;
+            padding: 12px;
+        }
+        QTabBar::tab {
+            background: rgba(255,255,255,0.92);
+            color: #0f1720;
+            border: 1px solid rgba(255,255,255,0.10);
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            padding: 14px 22px;
+            margin-right: 8px;
+            font-weight: 700;
+            min-width: 140px;
+            min-height: 48px;
+            font-size: 13px;
+        }
+        QTabBar::tab:selected {
+            background: rgba(255,255,255,1.00);
+            box-shadow: 0px 6px 18px rgba(8,15,25,0.08);
+        }
+        QTabBar::tab:!selected {
+            background: rgba(255,255,255,0.88);
+        }
+        QTabBar::tab:hover {
+            background: rgba(255,255,255,0.98);
+        }
+        """
+        self.tabs.setStyleSheet(tab_style)
+
         # Duplicates tab
         self.duplicates_container = QWidget()
         self.duplicates_layout = QVBoxLayout(self.duplicates_container)
         self.duplicates_layout.setAlignment(Qt.AlignTop)
+        self.duplicates_layout.setContentsMargins(8, 8, 8, 8)
+        self.duplicates_layout.setSpacing(8)
         self.duplicates_scroll = QScrollArea()
         self.duplicates_scroll.setWidgetResizable(True)
+        self.duplicates_scroll.setFrameShape(QFrame.NoFrame)
+        self.duplicates_scroll.setStyleSheet("background: transparent;")
         self.duplicates_scroll.setWidget(self.duplicates_container)
         self.tabs.addTab(self.duplicates_scroll, "Duplicates")
 
@@ -237,8 +277,12 @@ class MainWindow(QWidget):
         self.uniques_ref_container = QWidget()
         self.uniques_ref_layout = QVBoxLayout(self.uniques_ref_container)
         self.uniques_ref_layout.setAlignment(Qt.AlignTop)
+        self.uniques_ref_layout.setContentsMargins(8, 8, 8, 8)
+        self.uniques_ref_layout.setSpacing(8)
         self.uniques_ref_scroll = QScrollArea()
         self.uniques_ref_scroll.setWidgetResizable(True)
+        self.uniques_ref_scroll.setFrameShape(QFrame.NoFrame)
+        self.uniques_ref_scroll.setStyleSheet("background: transparent;")
         self.uniques_ref_scroll.setWidget(self.uniques_ref_container)
         self.tabs.addTab(self.uniques_ref_scroll, "Uniques (Reference)")
 
@@ -246,12 +290,17 @@ class MainWindow(QWidget):
         self.uniques_work_container = QWidget()
         self.uniques_work_layout = QVBoxLayout(self.uniques_work_container)
         self.uniques_work_layout.setAlignment(Qt.AlignTop)
+        self.uniques_work_layout.setContentsMargins(8, 8, 8, 8)
+        self.uniques_work_layout.setSpacing(8)
         self.uniques_work_scroll = QScrollArea()
         self.uniques_work_scroll.setWidgetResizable(True)
+        self.uniques_work_scroll.setFrameShape(QFrame.NoFrame)
+        self.uniques_work_scroll.setStyleSheet("background: transparent;")
         self.uniques_work_scroll.setWidget(self.uniques_work_container)
         self.tabs.addTab(self.uniques_work_scroll, "Uniques (Working)")
 
-        layout.addWidget(self.tabs)
+        # Make tabs occupy remaining vertical space
+        layout.addWidget(self.tabs, stretch=1)
 
         # Footer
         footer_sep = QFrame()
@@ -723,8 +772,8 @@ class MainWindow(QWidget):
         self._update_selected_count()
         if errors:
             QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
-        else:
-            QMessageBox.information(self, "Done", "Selected files moved to Trash.")
+            else:
+                QMessageBox.information(self, "Done", "Selected files moved to Trash.")
 
     def _clear_results(self):
         # kept for compatibility, clear all tabs
