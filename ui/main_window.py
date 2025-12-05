@@ -1,16 +1,21 @@
 # ui/main_window.py
-# Fixes:
-# - Restored progress bar (self.progress) on the options/search row so on_search_clicked can call self.progress.setValue(0).
-# - Added a persistent left-toggle button (self.left_toggle_btn) outside the panel so the panel can be reopened after hiding.
-# - Styled buttons use objectName for targeted styling in ui/styles.py.
-# - Kept Search on the same row as other hash controls.
+# Complete MainWindow implementation (full file) - consolidated and self-contained.
+# This file contains:
+# - Left collapsible directory-only browser panel with persistent root.
+# - Top inputs for Reference/Working folders (drag & drop supported).
+# - Options row with Compare fields dropdown, Hash checkbox, Info button, Similarity slider, Search button and Progress bar.
+# - Tabs for Duplicates / Uniques (Ref) / Uniques (Work) that show counts in tab headers.
+# - Footer with action buttons and copyright.
+# - All handlers referenced by signal.connect(...) are implemented to avoid AttributeError.
 #
-# Overwrite ui/main_window.py with this file and restart the app.
+# Note: This file expects ui/styles.py to provide GLASSY_STYLE / DARK_STYLE and the custom DirOnlyModel is defined here.
 
 import os
 import shutil
 from pathlib import Path
 from typing import List
+import logging
+
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QFileDialog, QCheckBox, QProgressBar, QScrollArea,
@@ -19,18 +24,19 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QSettings, QDir, QModelIndex
 from PyQt5.QtGui import QPixmap, QIcon
+
 from core.image_scanner import scan_images_in_directory, ImageFileObj
 from core.comparator import find_duplicates, find_uniques
 from .styles import GLASSY_STYLE, DARK_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
 from send2trash import send2trash
-import logging
 
 logger = logging.getLogger(__name__)
 
-# DropLineEdit (directory drag-drop)
+
 class DropLineEdit(QLineEdit):
+    """QLineEdit that accepts a dropped folder path."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setAcceptDrops(True)
@@ -55,13 +61,14 @@ class DropLineEdit(QLineEdit):
         event.acceptProposedAction()
 
 
-# Dir-only model for left tree (keeps count of files in folder display)
 class DirOnlyModel(QFileSystemModel):
+    """QFileSystemModel showing directories only and displaying file counts in the label."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setFilter(QDir.NoDotAndDotDot | QDir.Dirs)
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
+        # For display role and name column, show "Name (Nfiles)"
         if role == Qt.DisplayRole and index.column() == 0:
             name = super().data(index, role)
             try:
@@ -96,6 +103,7 @@ def make_button(text: str = "", icon: QIcon = None, object_name: str = "", style
 
 
 class SearchThread(QThread):
+    """Background thread: scans folders and runs comparator."""
     results_ready = pyqtSignal(object)
     progress = pyqtSignal(int)
 
@@ -106,7 +114,7 @@ class SearchThread(QThread):
         self.criteria = criteria
 
     def run(self):
-        logger.debug("SearchThread: scanning ref: %s work: %s criteria: %s", self.ref_dir, self.work_dir, self.criteria)
+        logger.debug("SearchThread: scanning ref=%s work=%s criteria=%s", self.ref_dir, self.work_dir, self.criteria)
         self.progress.emit(5)
         ref_files = scan_images_in_directory(self.ref_dir) if self.ref_dir else []
         self.progress.emit(40)
@@ -117,14 +125,14 @@ class SearchThread(QThread):
         uniques = ([], [])
         try:
             duplicates = find_duplicates(ref_files, work_files, self.criteria)
-        except Exception as e:
-            logger.exception("find_duplicates failed: %s", e)
+        except Exception:
+            logger.exception("find_duplicates failed")
         try:
             uniques = find_uniques(ref_files, work_files, self.criteria)
             if uniques is None:
                 uniques = ([], [])
-        except Exception as e:
-            logger.exception("find_uniques failed: %s", e)
+        except Exception:
+            logger.exception("find_uniques failed")
             uniques = ([], [])
 
         self.progress.emit(95)
@@ -149,21 +157,29 @@ class MainWindow(QWidget):
         self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         theme = self._settings.value("theme", "light")
         self._apply_theme(theme)
+        # internal state
+        self._thread = None
+        self._last_results = None
+        self._selected_paths = set()
+        self._last_tree_index = None
+
         self._build_ui()
         self._restore_settings()
 
+    # ---------- styling ----------
     def _apply_theme(self, theme_name: str):
         if theme_name == "dark":
             self.setStyleSheet(DARK_STYLE)
         else:
             self.setStyleSheet(GLASSY_STYLE)
 
+    # ---------- UI construction ----------
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
-        # Left toggle button (always accessible) - appears when panel hidden
+        # left-toggle button (visible only when panel hidden)
         self.left_toggle_btn = QToolButton()
         self.left_toggle_btn.setObjectName("left_toggle_btn")
         self.left_toggle_btn.setText("▶")
@@ -172,16 +188,16 @@ class MainWindow(QWidget):
         self.left_toggle_btn.clicked.connect(self._show_left_panel)
         main_layout.addWidget(self.left_toggle_btn)
 
-        # Left panel (dir-only tree)
+        # left panel
         self.left_panel = QFrame()
         self.left_panel.setObjectName("left_panel")
         self.left_panel.setMinimumWidth(220)
         self.left_panel.setMaximumWidth(360)
         lp_layout = QVBoxLayout(self.left_panel)
-        lp_layout.setContentsMargins(8,8,8,8)
+        lp_layout.setContentsMargins(8, 8, 8, 8)
         lp_layout.setSpacing(6)
 
-        # Collapse button now inside panel (for local collapse)
+        # collapse button inside panel
         self.collapse_btn = QToolButton()
         self.collapse_btn.setObjectName("collapse_btn")
         self.collapse_btn.setText("◀")
@@ -189,7 +205,7 @@ class MainWindow(QWidget):
         self.collapse_btn.clicked.connect(self._hide_left_panel)
         lp_layout.addWidget(self.collapse_btn, alignment=Qt.AlignLeft)
 
-        # Browser root input + set
+        # browser root
         self.browser_root_input = QLineEdit()
         last_root = self._settings.value("browser_root", str(Path.home()))
         self.browser_root_input.setText(last_root)
@@ -200,7 +216,7 @@ class MainWindow(QWidget):
         row.addWidget(set_root_btn)
         lp_layout.addLayout(row)
 
-        # Dir-only model and tree view
+        # dir-only tree
         self.fs_model = DirOnlyModel()
         self.fs_model.setRootPath(QDir.rootPath())
         self.browser_tree = QTreeView()
@@ -213,7 +229,7 @@ class MainWindow(QWidget):
         self.browser_tree.clicked.connect(self._on_tree_clicked)
         lp_layout.addWidget(self.browser_tree, 1)
 
-        # Buttons to set selection
+        # set reference / working buttons
         btn_row = QHBoxLayout()
         set_ref_btn = make_button("As Reference", style_class="neutral")
         set_ref_btn.clicked.connect(self._set_selected_as_ref)
@@ -223,13 +239,13 @@ class MainWindow(QWidget):
         btn_row.addWidget(set_work_btn)
         lp_layout.addLayout(btn_row)
 
-        # Main content
+        # main content
         self.main_content = QWidget()
         content_layout = QVBoxLayout(self.main_content)
-        content_layout.setContentsMargins(6,6,6,6)
+        content_layout.setContentsMargins(6, 6, 6, 6)
         content_layout.setSpacing(8)
 
-        # Top row: reference/work inputs + theme toggle (kept compact)
+        # top row - Reference / Working inputs and theme toggle
         top_row = QHBoxLayout()
         self.ref_dir = DropLineEdit()
         self.ref_dir.setText(self._settings.value("last_ref", ""))
@@ -250,13 +266,13 @@ class MainWindow(QWidget):
         self.theme_btn = QToolButton()
         self.theme_btn.setObjectName("theme_toggle_btn")
         self.theme_btn.setCheckable(True)
-        self.theme_btn.setChecked(self._settings.value("theme","light")=="dark")
+        self.theme_btn.setChecked(self._settings.value("theme", "light") == "dark")
         self._apply_theme_button_text()
         self.theme_btn.clicked.connect(self._on_theme_toggle)
         top_row.addWidget(self.theme_btn)
         content_layout.addLayout(top_row)
 
-        # Options row: compare dropdown, hash checkbox, info button, similarity, search and progress
+        # options row - compare dropdown, hash, info, similarity, search, progress
         options_row = QHBoxLayout()
         self.field_selector_btn = QToolButton()
         self.field_selector_btn.setObjectName("field_selector_btn")
@@ -264,13 +280,13 @@ class MainWindow(QWidget):
         self.field_selector_btn.setPopupMode(QToolButton.InstantPopup)
         self.field_menu = QMenu(self)
         self.field_actions = {}
-        fields = [("Name","name"), ("Size","size"), ("Created","created"), ("mtime","mtime"), ("Dimensions","dimensions")]
-        for label,key in fields:
+        fields = [("Name", "name"), ("Size", "size"), ("Created", "created"), ("mtime", "mtime"), ("Dimensions", "dimensions")]
+        for label, key in fields:
             act = QAction(label, self)
             act.setCheckable(True)
             act.toggled.connect(self._on_field_toggled)
             self.field_menu.addAction(act)
-            self.field_actions[key]=act
+            self.field_actions[key] = act
         self.field_selector_btn.setMenu(self.field_menu)
 
         self.hash_cb = QCheckBox("By Hash (dhash, size=16)")
@@ -283,7 +299,7 @@ class MainWindow(QWidget):
         self.sim_slider = QSlider(Qt.Horizontal)
         self.sim_slider.setMinimum(50)
         self.sim_slider.setMaximum(100)
-        self.sim_slider.setValue(int(self._settings.value("similarity",90)))
+        self.sim_slider.setValue(int(self._settings.value("similarity", 90)))
         self.sim_slider.setFixedWidth(180)
         self.sim_lbl = QLabel(f"{self.sim_slider.value()}%")
         self.sim_slider.valueChanged.connect(lambda v: self.sim_lbl.setText(f"{v}%"))
@@ -292,9 +308,9 @@ class MainWindow(QWidget):
         self.search_btn.clicked.connect(self.on_search_clicked)
         self.search_btn.setMinimumWidth(84)
 
-        # Progress (restored)
+        # progress bar
         self.progress = QProgressBar()
-        self.progress.setRange(0,100)
+        self.progress.setRange(0, 100)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(14)
         self.progress.setFixedWidth(160)
@@ -310,12 +326,13 @@ class MainWindow(QWidget):
         options_row.addWidget(self.progress)
         content_layout.addLayout(options_row)
 
-        # Tabs
+        # tabs
         self.tabs = QTabWidget()
         self.tabs.tabBar().setExpanding(False)
         self.tabs.tabBar().setUsesScrollButtons(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        # duplicates tab
         self.duplicates_container = QWidget()
         self.duplicates_layout = QVBoxLayout(self.duplicates_container)
         self.duplicates_layout.setAlignment(Qt.AlignTop)
@@ -324,6 +341,7 @@ class MainWindow(QWidget):
         self.duplicates_scroll.setWidget(self.duplicates_container)
         self.tabs.addTab(self.duplicates_scroll, "Duplicates (0)")
 
+        # uniques ref tab
         self.uniques_ref_container = QWidget()
         self.uniques_ref_layout = QVBoxLayout(self.uniques_ref_container)
         self.uniques_ref_layout.setAlignment(Qt.AlignTop)
@@ -332,6 +350,7 @@ class MainWindow(QWidget):
         self.uniques_ref_scroll.setWidget(self.uniques_ref_container)
         self.tabs.addTab(self.uniques_ref_scroll, "Uniques (Ref) (0)")
 
+        # uniques work tab
         self.uniques_work_container = QWidget()
         self.uniques_work_layout = QVBoxLayout(self.uniques_work_container)
         self.uniques_work_layout.setAlignment(Qt.AlignTop)
@@ -342,7 +361,7 @@ class MainWindow(QWidget):
 
         content_layout.addWidget(self.tabs, 1)
 
-        # Footer
+        # footer with action buttons
         footer_row = QHBoxLayout()
         self.delete_btn = make_button("Delete duplicates", style_class="danger")
         self.delete_btn.clicked.connect(self._on_delete_all_duplicates)
@@ -359,21 +378,18 @@ class MainWindow(QWidget):
         footer_row.addWidget(self.footer_label)
         content_layout.addLayout(footer_row)
 
+        # assemble
         main_layout.addWidget(self.left_panel)
         main_layout.addWidget(self.main_content)
 
-        self._thread = None
-        self._last_results = None
-        self._selected_paths = set()
-        self._last_tree_index = None
-
+    # ---------- settings restoration ----------
     def _restore_settings(self):
         root = self._settings.value("browser_root", str(Path.home()))
         if os.path.isdir(root):
             self.browser_tree.setRootIndex(self.fs_model.index(root))
         self._apply_theme_button_text()
 
-    # left panel helpers
+    # ---------- left panel helpers ----------
     def _hide_left_panel(self):
         self.left_panel.hide()
         self.left_toggle_btn.setVisible(True)
@@ -409,12 +425,12 @@ class MainWindow(QWidget):
             self.work_dir.setText(path)
             self._settings.setValue("last_work", path)
 
-    # theme & control helpers
+    # ---------- theme and small controls ----------
     def _apply_theme_button_text(self):
-        self.theme_btn.setText("🌙" if self._settings.value("theme","light")=="dark" else "☀️")
+        self.theme_btn.setText("🌙" if self._settings.value("theme", "light") == "dark" else "☀️")
 
     def _on_theme_toggle(self):
-        new = "dark" if self._settings.value("theme","light")!="dark" else "light"
+        new = "dark" if self._settings.value("theme", "light") != "dark" else "light"
         self._settings.setValue("theme", new)
         self._apply_theme(new)
         self._apply_theme_button_text()
@@ -441,7 +457,7 @@ class MainWindow(QWidget):
         if any_checked and self.hash_cb.isChecked():
             self.hash_cb.setChecked(False)
 
-    # search flow
+    # ---------- search flow ----------
     def on_search_clicked(self):
         ref = self.ref_dir.text().strip()
         work = self.work_dir.text().strip()
@@ -452,7 +468,7 @@ class MainWindow(QWidget):
         self._settings.setValue("last_ref", ref)
         self._settings.setValue("last_work", work)
         self._settings.setValue("similarity", self.sim_slider.value())
-        fields = [k for k,v in self.field_actions.items() if v.isChecked()]
+        fields = [k for k, v in self.field_actions.items() if v.isChecked()]
         criteria = {
             "fields": fields,
             "size": False,
@@ -464,7 +480,6 @@ class MainWindow(QWidget):
         }
         logger.debug("MainWindow: starting search with criteria: %s", criteria)
         self.search_btn.setEnabled(False)
-        # ensure progress exists and reset
         try:
             self.progress.setValue(0)
         except Exception:
@@ -476,88 +491,27 @@ class MainWindow(QWidget):
         self._thread.finished.connect(self._on_search_finished)
         self._thread.start()
 
-    def _on_progress(self, v:int):
-        # update progress bar safely
+    def _on_progress(self, v: int):
         try:
             self.progress.setValue(v)
         except Exception:
             pass
-    def _on_delete_all_duplicates(self):
-        """
-        Delete all duplicate working files shown in the current results (move them to Trash).
-        This method is safe if no results exist and reports any errors to the user.
-        """
-        # No-results guard
-        if not getattr(self, "_last_results", None):
-            QMessageBox.information(self, "No results", "No search results.")
-            return
 
-        duplicates = self._last_results.get("duplicates", [])
-        if not duplicates:
-            QMessageBox.information(self, "No duplicates", "No duplicates found.")
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm delete all duplicates",
-            "Delete all duplicate working files? (Will move to Trash)",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        # Collect working-file paths to delete
-        to_delete = [w.path for (r, w, _) in duplicates if getattr(w, "path", None)]
-
-        errors = []
-        for p in to_delete:
-            try:
-                if os.path.exists(p):
-                    send2trash(p)
-            except Exception as e:
-                errors.append((p, str(e)))
-
-        # Remove widgets for deleted paths from all tabs
-        try:
-            self._remove_widgets_for_paths(to_delete)
-        except Exception:
-            logger.exception("Failed to remove widgets for deleted paths")
-
-        if errors:
-            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to Trash:\n{errors}")
-        else:
-            QMessageBox.information(self, "Done", "All duplicate working files moved to Trash.")
-    def _on_tab_changed(self, index: int):
-        """
-        Called when the user switches tabs.
-
-        Kept intentionally lightweight (no-op) to avoid side-effects; this fixes the
-        AttributeError caused by connecting to a missing handler. If you want visual
-        changes when tabs switch (e.g. refresh contents, lazy-load thumbnails), we
-        can implement them here later.
-        """
-        try:
-            # If you want to show a short summary in the footer or refresh the visible tab,
-            # do it here. For now we keep it a no-op to prevent crashes.
-            return
-        except Exception:
-            logger.exception("Error inside _on_tab_changed")
-            return
     def _on_results_ready(self, payload: dict):
         self._last_results = payload
         self._selected_paths.clear()
         duplicates = payload.get("duplicates", [])
         uref = payload.get("unique_in_ref", [])
         uwork = payload.get("unique_in_work", [])
-        # update tab texts with counts
+        # update tab counts
         self.tabs.setTabText(0, f"Duplicates ({len(duplicates)})")
         self.tabs.setTabText(1, f"Uniques (Ref) ({len(uref)})")
         self.tabs.setTabText(2, f"Uniques (Work) ({len(uwork)})")
-        # populate content
+        # populate tabs (clear then add)
         self._clear_tabs()
         if duplicates:
-            for r,w, reasons in duplicates:
-                self._add_duplicate(r,w,reasons)
+            for r, w, reasons in duplicates:
+                self._add_duplicate(r, w, reasons)
         else:
             self._add_label(self.duplicates_layout, "No duplicates found.")
         if uref:
@@ -576,10 +530,251 @@ class MainWindow(QWidget):
         except Exception:
             pass
 
-    # rest of file unchanged (duplicate/unique widget helpers, file operations, etc.)
     def _on_search_finished(self):
         self.search_btn.setEnabled(True)
         try:
             self.progress.setValue(100)
         except Exception:
             pass
+
+    def _on_tab_changed(self, index: int):
+        # placeholder for future lazy-load / refresh behavior
+        return
+
+    # ---------- UI helpers for rendering ----------
+    def _clear_tabs(self):
+        for layout in (self.duplicates_layout, self.uniques_ref_layout, self.uniques_work_layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+
+    def _add_label(self, layout, text):
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+    def _add_duplicate(self, r: ImageFileObj, w: ImageFileObj, reasons: List[str]):
+        row = QFrame()
+        row.setFrameShape(QFrame.StyledPanel)
+        row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
+        rl = QHBoxLayout(row)
+        cb_r = QCheckBox()
+        cb_r.stateChanged.connect(lambda s, p=r.path: self._toggle_selection(p, s))
+        cb_w = QCheckBox()
+        cb_w.stateChanged.connect(lambda s, p=w.path: self._toggle_selection(p, s))
+        thumb_r = QLabel()
+        pixr = QPixmap(r.path)
+        if not pixr.isNull():
+            thumb_r.setPixmap(pixr.scaled(92, 92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        thumb_w = QLabel()
+        pixw = QPixmap(w.path)
+        if not pixw.isNull():
+            thumb_w.setPixmap(pixw.scaled(92, 92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        info = QLabel(f"Ref: {r.path}\nWork: {w.path}\nMatch: {', '.join(reasons)}")
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        compare_btn = make_button("Compare", style_class="neutral")
+        compare_btn.clicked.connect(lambda _, a=r, b=w, rs=reasons: self._open_compare_modal(a, b, rs))
+        rl.addWidget(cb_r)
+        rl.addWidget(thumb_r)
+        rl.addWidget(cb_w)
+        rl.addWidget(thumb_w)
+        rl.addWidget(info, 1)
+        rl.addWidget(compare_btn)
+        self.duplicates_layout.addWidget(row)
+
+    def _add_unique(self, f: ImageFileObj, side: str = "ref"):
+        row = QFrame()
+        row.setFrameShape(QFrame.StyledPanel)
+        row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
+        rl = QHBoxLayout(row)
+        cb = QCheckBox()
+        cb.stateChanged.connect(lambda s, p=f.path: self._toggle_selection(p, s))
+        thumb = QLabel()
+        pix = QPixmap(f.path)
+        if not pix.isNull():
+            thumb.setPixmap(pix.scaled(112, 112, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        info = QLabel(f"{'Reference' if side == 'ref' else 'Working'} unique\nName: {f.name}\nSize: {f.size}\nDims: {f.dimensions}\nPath: {f.path}")
+        info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        open_btn = make_button("Open", style_class="neutral")
+        open_btn.clicked.connect(lambda _, p=f.path: os.startfile(p) if os.path.exists(p) else None)
+        rl.addWidget(cb)
+        rl.addWidget(thumb)
+        rl.addWidget(info, 1)
+        rl.addWidget(open_btn)
+        if side == "ref":
+            self.uniques_ref_layout.addWidget(row)
+        else:
+            self.uniques_work_layout.addWidget(row)
+
+    def _toggle_selection(self, path: str, state):
+        if state == Qt.Checked:
+            self._selected_paths.add(path)
+        else:
+            self._selected_paths.discard(path)
+        self._update_selected_count()
+
+    def _update_selected_count(self):
+        self.footer_label.setText(f"© Mufaddal Kothari    Selected: {len(self._selected_paths)}")
+
+    def _open_compare_modal(self, a: ImageFileObj, b: ImageFileObj, reasons):
+        meta1 = {"name": a.name, "size": a.size, "path": a.path, "dimensions": a.dimensions}
+        meta2 = {"name": b.name, "size": b.size, "path": b.path, "dimensions": b.dimensions}
+        modal = ComparisonModal(a.path, b.path, meta1, meta2, ", ".join(reasons), action_callback=self._on_modal_action, parent=self)
+        modal.exec_()
+
+    def _on_modal_action(self, action: str, paths: List[str]):
+        if action.startswith("delete") and paths:
+            for p in paths:
+                try:
+                    if os.path.exists(p):
+                        send2trash(p)
+                except Exception:
+                    pass
+            self._remove_widgets_for_paths(paths)
+
+    # ---------- file operations / actions ----------
+    def _remove_widgets_for_paths(self, paths: List[str]):
+        path_set = set(paths)
+        for layout in (self.duplicates_layout, self.uniques_ref_layout, self.uniques_work_layout):
+            i = 0
+            while i < layout.count():
+                item = layout.itemAt(i)
+                widget = item.widget()
+                should_remove = False
+                if widget:
+                    labels = widget.findChildren(QLabel)
+                    for lbl in labels:
+                        txt = lbl.text() or ""
+                        for p in path_set:
+                            if p in txt:
+                                should_remove = True
+                                break
+                        if should_remove:
+                            break
+                if should_remove:
+                    w = layout.takeAt(i).widget()
+                    if w:
+                        w.deleteLater()
+                else:
+                    i += 1
+
+    def _on_delete_all_duplicates(self):
+        """Delete all duplicate working files (move to Trash)."""
+        if not getattr(self, "_last_results", None):
+            QMessageBox.information(self, "No results", "No search results.")
+            return
+        duplicates = self._last_results.get("duplicates", [])
+        if not duplicates:
+            QMessageBox.information(self, "No duplicates", "No duplicates found.")
+            return
+        reply = QMessageBox.question(self, "Confirm delete all duplicates", "Delete all duplicate working files? (Will move to Trash)", QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        to_delete = [w.path for (r, w, _) in duplicates if getattr(w, "path", None)]
+        errors = []
+        for p in to_delete:
+            try:
+                if os.path.exists(p):
+                    send2trash(p)
+            except Exception as e:
+                errors.append((p, str(e)))
+        try:
+            self._remove_widgets_for_paths(to_delete)
+        except Exception:
+            logger.exception("Failed to remove widgets for deleted paths")
+        if errors:
+            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to Trash:\n{errors}")
+        else:
+            QMessageBox.information(self, "Done", "All duplicate working files moved to Trash.")
+
+    def _on_keep_all_duplicates(self):
+        """Remove duplicates from view (keep files on disk)."""
+        if not getattr(self, "_last_results", None):
+            QMessageBox.information(self, "No results", "No search results.")
+            return
+        duplicates = self._last_results.get("duplicates", [])
+        if not duplicates:
+            QMessageBox.information(self, "No duplicates", "No duplicates found.")
+            return
+        to_remove = []
+        for (r, w, _) in duplicates:
+            to_remove.extend([r.path, w.path])
+        self._remove_widgets_for_paths(to_remove)
+        QMessageBox.information(self, "Done", "Duplicates removed from view (kept on disk).")
+
+    def _on_save_uniques(self):
+        """Copy uniques to a chosen destination folder."""
+        if not getattr(self, "_last_results", None):
+            QMessageBox.information(self, "No results", "No search results.")
+            return
+        unique_in_ref = self._last_results.get("unique_in_ref", [])
+        unique_in_work = self._last_results.get("unique_in_work", [])
+        if not unique_in_ref and not unique_in_work:
+            QMessageBox.information(self, "No uniques", "No unique files found.")
+            return
+        dlg = QFileDialog(self, caption="Select destination folder")
+        dlg.setFileMode(QFileDialog.Directory)
+        if dlg.exec_():
+            dest = dlg.selectedFiles()[0]
+            dest_path = Path(dest)
+            errors = []
+            def _copy_list(list_files, sub):
+                if not list_files:
+                    return
+                folder = dest_path / sub
+                folder.mkdir(parents=True, exist_ok=True)
+                for f in list_files:
+                    src = Path(f.path)
+                    if not src.exists():
+                        errors.append((str(src), "Missing"))
+                        continue
+                    dest_file = folder / src.name
+                    try:
+                        shutil.copy2(str(src), str(dest_file))
+                    except Exception as e:
+                        errors.append((str(src), str(e)))
+            _copy_list(unique_in_ref, "reference_uniques")
+            _copy_list(unique_in_work, "working_uniques")
+            if errors:
+                QMessageBox.warning(self, "Copy errors", f"Some files failed to copy:\n{errors}")
+            else:
+                QMessageBox.information(self, "Done", f"Copied uniques to {dest_path}")
+
+    def _on_move_selected(self):
+        if not self._selected_paths:
+            QMessageBox.information(self, "No selection", "No files selected.")
+            return
+        dlg = QFileDialog(self, caption="Select destination folder")
+        dlg.setFileMode(QFileDialog.Directory)
+        if dlg.exec_():
+            dest = dlg.selectedFiles()[0]
+            for p in list(self._selected_paths):
+                try:
+                    if os.path.exists(p):
+                        shutil.move(p, os.path.join(dest, os.path.basename(p)))
+                        self._remove_widgets_for_paths([p])
+                        self._selected_paths.discard(p)
+                except Exception:
+                    pass
+            self._update_selected_count()
+            QMessageBox.information(self, "Done", "Moved selected files.")
+
+    def _on_delete_selected(self):
+        if not self._selected_paths:
+            QMessageBox.information(self, "No selection", "No files selected.")
+            return
+        reply = QMessageBox.question(self, "Confirm delete", f"Move {len(self._selected_paths)} items to Trash?", QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        for p in list(self._selected_paths):
+            try:
+                if os.path.exists(p):
+                    send2trash(p)
+                    self._remove_widgets_for_paths([p])
+                    self._selected_paths.discard(p)
+            except Exception:
+                pass
+        self._update_selected_count()
+        QMessageBox.information(self, "Done", "Deleted selected files.")
