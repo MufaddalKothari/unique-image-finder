@@ -1,14 +1,8 @@
 # ui/main_window.py
 # Complete MainWindow implementation (full file) - consolidated and self-contained.
-# This file contains:
-# - Left collapsible directory-only browser panel with persistent root.
-# - Top inputs for Reference/Working folders (drag & drop supported).
-# - Options row with Compare fields dropdown, Hash checkbox, Info button, Similarity slider, Search button and Progress bar.
-# - Tabs for Duplicates / Uniques (Ref) / Uniques (Work) that show counts in tab headers.
-# - Footer with action buttons and copyright.
-# - All handlers referenced by signal.connect(...) are implemented to avoid AttributeError.
+# Added Move Selected and Delete Selected footer buttons and ensured their handlers are present.
 #
-# Note: This file expects ui/styles.py to provide GLASSY_STYLE / DARK_STYLE and the custom DirOnlyModel is defined here.
+# This file depends on ui/styles.py for GLASSY_STYLE / DARK_STYLE.
 
 import os
 import shutil
@@ -369,9 +363,18 @@ class MainWindow(QWidget):
         self.keep_btn.clicked.connect(self._on_keep_all_duplicates)
         self.save_uniques_btn = make_button("Save Uniques", style_class="success")
         self.save_uniques_btn.clicked.connect(self._on_save_uniques)
+
+        # Add Move Selected and Delete Selected buttons
+        self.move_selected_btn = make_button("Move Selected", style_class="neutral")
+        self.move_selected_btn.clicked.connect(self._on_move_selected)
+        self.delete_selected_btn = make_button("Delete Selected", style_class="danger")
+        self.delete_selected_btn.clicked.connect(self._on_delete_selected)
+
         footer_row.addWidget(self.delete_btn)
         footer_row.addWidget(self.keep_btn)
         footer_row.addWidget(self.save_uniques_btn)
+        footer_row.addWidget(self.move_selected_btn)
+        footer_row.addWidget(self.delete_selected_btn)
         footer_row.addStretch(1)
         self.footer_label = QLabel("© Mufaddal Kothari")
         self.footer_label.setObjectName("footer_label")
@@ -743,38 +746,49 @@ class MainWindow(QWidget):
                 QMessageBox.information(self, "Done", f"Copied uniques to {dest_path}")
 
     def _on_move_selected(self):
+        """Move selected files (from any tab) to a user-picked folder."""
         if not self._selected_paths:
-            QMessageBox.information(self, "No selection", "No files selected.")
+            QMessageBox.information(self, "No selection", "No files selected to move.")
             return
         dlg = QFileDialog(self, caption="Select destination folder")
         dlg.setFileMode(QFileDialog.Directory)
         if dlg.exec_():
             dest = dlg.selectedFiles()[0]
+            errors = []
             for p in list(self._selected_paths):
                 try:
                     if os.path.exists(p):
-                        shutil.move(p, os.path.join(dest, os.path.basename(p)))
+                        dest_path = os.path.join(dest, os.path.basename(p))
+                        shutil.move(p, dest_path)
                         self._remove_widgets_for_paths([p])
                         self._selected_paths.discard(p)
-                except Exception:
-                    pass
+                except Exception as e:
+                    errors.append((p, str(e)))
             self._update_selected_count()
-            QMessageBox.information(self, "Done", "Moved selected files.")
+            if errors:
+                QMessageBox.warning(self, "Move errors", f"Some files could not be moved:\n{errors}")
+            else:
+                QMessageBox.information(self, "Done", "Selected files moved.")
 
     def _on_delete_selected(self):
+        """Move selected files to Trash (delete selected)."""
         if not self._selected_paths:
-            QMessageBox.information(self, "No selection", "No files selected.")
+            QMessageBox.information(self, "No selection", "No files selected to delete.")
             return
-        reply = QMessageBox.question(self, "Confirm delete", f"Move {len(self._selected_paths)} items to Trash?", QMessageBox.Yes | QMessageBox.No)
+        reply = QMessageBox.question(self, "Confirm delete", f"Move {len(self._selected_paths)} selected files to Trash?", QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
+        errors = []
         for p in list(self._selected_paths):
             try:
                 if os.path.exists(p):
                     send2trash(p)
                     self._remove_widgets_for_paths([p])
                     self._selected_paths.discard(p)
-            except Exception:
-                pass
+            except Exception as e:
+                errors.append((p, str(e)))
         self._update_selected_count()
-        QMessageBox.information(self, "Done", "Deleted selected files.")
+        if errors:
+            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to trash:\n{errors}")
+        else:
+            QMessageBox.information(self, "Done", "Selected files moved to Trash.") 
