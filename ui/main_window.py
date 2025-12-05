@@ -1,12 +1,16 @@
 # ui/main_window.py
-# Updated UI:
-# - Tabs in the center area have an improved glassy/white look, thicker tab appearance,
-#   and they span the available center area.
-# - Scroll areas and containers are sized to expand to fill the tab content region.
-# - Styling kept conservative to remain compatible with existing GLASSY_STYLE.
+# UI polish changes requested:
+# 1) Off-white (less white) theme and a dark theme toggle (top-right).
+# 2) Colorful, shorter Adobe-style buttons with icons where appropriate.
+# 3) Tab headers more visible, expanded across center area.
+# 4) Remove the big "Unique Image Finder" header.
+# 5) Remember last reference & working folders using QSettings.
+# 6) Drag & drop support for reference and working path inputs.
+# 7) Curved progress bar styling comes from ui/styles.py.
+# 8) Footer copyright label.
 #
-# Overwrites the previous ui/main_window.py. Only visual/stylesheet changes were applied
-# to the tab widget and result containers; behavior remains the same.
+# This file replaces the previous ui/main_window.py. It uses GLASSY_STYLE / DARK_STYLE
+# from ui.styles and standard icons via style().standardIcon or unicode fallbacks.
 
 import os
 import shutil
@@ -16,14 +20,14 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QGroupBox, QFileDialog, QCheckBox, QProgressBar, QScrollArea,
     QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider,
-    QTabWidget
+    QTabWidget, QApplication, QStyle, QSpacerItem
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QSettings, QUrl
+from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtWidgets import QGraphicsDropShadowEffect
 from core.image_scanner import scan_images_in_directory, ImageFileObj
 from core.comparator import find_duplicates, find_uniques
-from .styles import GLASSY_STYLE
+from .styles import GLASSY_STYLE, DARK_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
 from send2trash import send2trash
@@ -31,21 +35,89 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# UI style constants
-BUTTON_GLASS_STYLE = """
-QPushButton, QToolButton {
-    background: rgba(250,250,252,0.88);
-    color: #0f1720;
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 10px;
-    padding: 10px 16px;
-    font-size: 14px;
-    font-weight: 600;
-}
-QPushButton:hover, QToolButton:hover {
-    background: rgba(255,255,255,0.96);
-}
-QSlider#similarity_slider { min-height: 28px; }
+# Helper: a QLineEdit that accepts directory drag-and-drop (folder path)
+class DropLineEdit(QLineEdit):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+        self.setPlaceholderText("Drop a folder here or click Browse")
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            # accept if any url is a local directory
+            for url in event.mimeData().urls():
+                if url.isLocalFile() and Path(url.toLocalFile()).is_dir():
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                p = Path(url.toLocalFile())
+                if p.is_dir():
+                    self.setText(str(p))
+                    self.editingFinished.emit()
+                    break
+        event.acceptProposedAction()
+
+
+# Small helper to build icon from standard style or unicode fallback
+def get_icon(name: str, app: QApplication):
+    style = app.style()
+    mapping = {
+        "search": QStyle.SP_FileDialogContentsView,
+        "open": QStyle.SP_DialogOpenButton,
+        "folder": QStyle.SP_DirOpenIcon,
+        "delete": QStyle.SP_TrashIcon,
+        "save": QStyle.SP_DialogSaveButton,
+        "move": QStyle.SP_ArrowForward,
+    }
+    sp = mapping.get(name)
+    if sp is not None:
+        try:
+            return style.standardIcon(sp)
+        except Exception:
+            pass
+    # fallback: use a unicode glyph as simple icon (keeps small)
+    glyphs = {
+        "search": "🔍",
+        "open": "📂",
+        "folder": "📁",
+        "delete": "🗑️",
+        "save": "💾",
+        "move": "➡️",
+    }
+    txt = glyphs.get(name, "")
+    icon = QIcon()
+    # create a minimal pixmap from text is more involved; return empty icon so button shows text if needed
+    return icon
+
+
+# Base button factory for Adobe-like buttons
+def make_button(text: str = "", icon: QIcon = None, object_name: str = "", style_class: str = "neutral", tooltip: str = "") -> QPushButton:
+    b = QPushButton(text)
+    if icon and not icon.isNull():
+        b.setIcon(icon)
+        # keep text minimal if icon present
+        if text:
+            b.setText(text)
+    b.setProperty("class", style_class)
+    if object_name:
+        b.setObjectName(object_name)
+    if tooltip:
+        b.setToolTip(tooltip)
+    b.setMinimumHeight(32)
+    b.setMaximumHeight(36)
+    b.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+    # shorter width: don't set fixed width, let layout control it
+    return b
+
+
+# UI style constants for additional inline tweaks
+INLINE_BUTTON_STYLE = """
+QPushButton { border: none; }
+QToolButton { border: none; }
 """
 
 class SearchThread(QThread):
@@ -96,56 +168,78 @@ class SearchThread(QThread):
 
 
 class MainWindow(QWidget):
+    SETTINGS_ORG = "unique-image-finder"
+    SETTINGS_APP = "uifinder"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Unique Image Finder")
         self.setMinimumWidth(1100)
-        try:
-            self.setStyleSheet(GLASSY_STYLE + BUTTON_GLASS_STYLE)
-        except Exception:
-            self.setStyleSheet(BUTTON_GLASS_STYLE)
+
+        # Load settings
+        self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self._theme = self._settings.value("theme", "light")
+
+        # Apply initial style
+        if self._theme == "dark":
+            self._apply_styles(DARK_STYLE)
+        else:
+            self._apply_styles(GLASSY_STYLE)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(8)
 
-        # Header
-        header = QLabel("🖼️ Unique Image Finder")
-        header.setStyleSheet("font-size:28px; font-weight:700; padding:14px 0px 8px 5px;")
-        layout.addWidget(header)
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: rgba(255,255,255,0.05);")
-        layout.addWidget(sep)
+        # Top bar: left has folders, right has theme toggle and small controls
+        top_bar = QHBoxLayout()
 
-        # Directory selectors
-        dir_layout = QHBoxLayout()
-        self.ref_dir = QLineEdit()
-        self.work_dir = QLineEdit()
-        ref_btn = QPushButton("Browse Reference")
-        work_btn = QPushButton("Browse Working")
+        # Reference Folder line edit (Drag & Drop enabled)
+        self.ref_dir = DropLineEdit()
+        self.ref_dir.setText(self._settings.value("last_ref", ""))
+        self.ref_dir.editingFinished.connect(self._save_ref_setting)
+
+        ref_btn = make_button("", icon=get_icon("folder", QApplication.instance()), object_name="ref_browse", style_class="neutral", tooltip="Browse reference folder")
         ref_btn.clicked.connect(lambda: self.browse_dir(self.ref_dir))
+
+        # Working Folder
+        self.work_dir = DropLineEdit()
+        self.work_dir.setText(self._settings.value("last_work", ""))
+        self.work_dir.editingFinished.connect(self._save_work_setting)
+
+        work_btn = make_button("", icon=get_icon("folder", QApplication.instance()), object_name="work_browse", style_class="neutral", tooltip="Browse working folder")
         work_btn.clicked.connect(lambda: self.browse_dir(self.work_dir))
 
-        dir_layout.addWidget(QLabel("Reference Folder (More Images):"))
-        dir_layout.addWidget(self.ref_dir)
-        dir_layout.addWidget(ref_btn)
-        dir_layout.addSpacing(12)
-        dir_layout.addWidget(QLabel("Working Folder (Less Images):"))
-        dir_layout.addWidget(self.work_dir)
-        dir_layout.addWidget(work_btn)
-        layout.addLayout(dir_layout)
+        top_bar.addWidget(QLabel("Reference:"))
+        top_bar.addWidget(self.ref_dir, 2)
+        top_bar.addWidget(ref_btn)
+        top_bar.addSpacing(8)
+        top_bar.addWidget(QLabel("Working:"))
+        top_bar.addWidget(self.work_dir, 2)
+        top_bar.addWidget(work_btn)
 
-        # Options
-        opts_top = QFrame()
-        opts_top.setFrameShape(QFrame.HLine)
-        opts_top.setStyleSheet("color: rgba(255,255,255,0.02);")
-        layout.addWidget(opts_top)
+        # spacer
+        top_bar.addItem(QSpacerItem(8, 8, QSizePolicy.Expanding, QSizePolicy.Minimum))
 
-        opts_group = QGroupBox("Search Options")
+        # Theme toggle (icon + text)
+        self.theme_btn = QToolButton()
+        self.theme_btn.setCheckable(True)
+        self.theme_btn.setChecked(self._theme == "dark")
+        self.theme_btn.setToolTip("Toggle dark/light theme")
+        if self._theme == "dark":
+            self.theme_btn.setText("🌙")
+        else:
+            self.theme_btn.setText("☀️")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        top_bar.addWidget(self.theme_btn)
+
+        layout.addLayout(top_bar)
+
+        # Options group (fields, hash toggle, similarity slider)
+        opts_group = QGroupBox()
+        opts_group.setTitle("Search Options")
         opts_layout = QHBoxLayout()
 
-        # Compare fields selector
+        # Compare fields selector (keeps same behavior)
         self.field_selector_btn = QToolButton()
         self.field_selector_btn.setText("Compare fields ▾")
         self.field_selector_btn.setPopupMode(QToolButton.InstantPopup)
@@ -172,22 +266,20 @@ class MainWindow(QWidget):
             self.field_menu.addAction(act)
             self.field_actions[key] = act
         self.field_selector_btn.setMenu(self.field_menu)
-        self.field_selector_btn.setStyleSheet("QToolButton { padding: 10px 14px; font-weight:600; }")
 
-        # Hash checkbox + similarity slider (hash_size removed; permanently 16)
+        # Hash checkbox + similarity slider (hash_size removed)
         self.hash_cb = QCheckBox("By Hash (dhash, size=16)")
         self.hash_cb.stateChanged.connect(self._on_hash_toggled)
 
-        # similarity slider and label
         self.sim_slider = QSlider(Qt.Horizontal)
         self.sim_slider.setMinimum(50)
         self.sim_slider.setMaximum(100)
-        self.sim_slider.setValue(90)
+        self.sim_slider.setValue(int(self._settings.value("similarity", 90)))
         self.sim_slider.setTickInterval(5)
         self.sim_slider.setTickPosition(QSlider.TicksBelow)
         self.sim_slider.setFixedWidth(220)
         self.sim_slider.setObjectName("similarity_slider")
-        self.sim_lbl = QLabel("Similarity: 90%")
+        self.sim_lbl = QLabel(f"Similarity: {self.sim_slider.value()}%")
         self.sim_slider.valueChanged.connect(lambda v: self.sim_lbl.setText(f"Similarity: {v}%"))
 
         self.hash_info_btn = QToolButton()
@@ -196,80 +288,45 @@ class MainWindow(QWidget):
         self.hash_info_btn.clicked.connect(self._open_hash_info)
 
         opts_layout.addWidget(self.field_selector_btn)
-        opts_layout.addStretch(1)
         opts_layout.addWidget(self.hash_cb)
         opts_layout.addWidget(self.sim_lbl)
         opts_layout.addWidget(self.sim_slider)
         opts_layout.addWidget(self.hash_info_btn)
-
         opts_group.setLayout(opts_layout)
         layout.addWidget(opts_group)
 
-        opts_bot = QFrame()
-        opts_bot.setFrameShape(QFrame.HLine)
-        opts_bot.setStyleSheet("color: rgba(255,255,255,0.02);")
-        layout.addWidget(opts_bot)
-
-        # Search
+        # Search / progress row
         act_layout = QHBoxLayout()
-        self.search_btn = QPushButton("🔍 Search")
-        self.search_btn.setStyleSheet("font-size:15px; padding:10px 18px;")
+        # Search button: icon-only with tooltip, styled primary
+        search_icon = get_icon("search", QApplication.instance())
+        self.search_btn = make_button("", icon=search_icon, object_name="search_btn", style_class="search", tooltip="Search")
+        self.search_btn.setObjectName("search_btn")
+        self.search_btn.clicked.connect(self.on_search_clicked)
+        self.search_btn.setMinimumWidth(42)
+        self.search_btn.setMaximumWidth(42)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
+        self.progress.setFixedHeight(16)
+        self.progress.setTextVisible(False)
+        self.progress.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
         act_layout.addWidget(self.search_btn)
         act_layout.addWidget(self.progress)
         layout.addLayout(act_layout)
 
-        # Results area -> Tabs: Duplicates | Uniques (Reference) | Uniques (Working)
+        # Results area -> Tabs
         self.tabs = QTabWidget()
-        # Make the tabs fill the center area and expand
         self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.tabs.tabBar().setExpanding(True)  # make tabs span central area
         self.tabs.setContentsMargins(0, 0, 0, 0)
-
-        # Improved glassy tab styling (thicker tabs, white/glassy look)
-        tab_style = """
-        QTabWidget::pane {
-            background: rgba(255,255,255,0.06);
-            border-radius: 12px;
-            padding: 12px;
-        }
-        QTabBar::tab {
-            background: rgba(255,255,255,0.92);
-            color: #0f1720;
-            border: 1px solid rgba(255,255,255,0.10);
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-            border-top-left-radius: 10px;
-            border-top-right-radius: 10px;
-            padding: 14px 22px;
-            margin-right: 8px;
-            font-weight: 700;
-            min-width: 140px;
-            min-height: 48px;
-            font-size: 13px;
-        }
-        QTabBar::tab:selected {
-            background: rgba(255,255,255,1.00);
-            box-shadow: 0px 6px 18px rgba(8,15,25,0.08);
-        }
-        QTabBar::tab:!selected {
-            background: rgba(255,255,255,0.88);
-        }
-        QTabBar::tab:hover {
-            background: rgba(255,255,255,0.98);
-        }
-        """
-        self.tabs.setStyleSheet(tab_style)
 
         # Duplicates tab
         self.duplicates_container = QWidget()
         self.duplicates_layout = QVBoxLayout(self.duplicates_container)
         self.duplicates_layout.setAlignment(Qt.AlignTop)
-        self.duplicates_layout.setContentsMargins(8, 8, 8, 8)
-        self.duplicates_layout.setSpacing(8)
         self.duplicates_scroll = QScrollArea()
         self.duplicates_scroll.setWidgetResizable(True)
-        self.duplicates_scroll.setFrameShape(QFrame.NoFrame)
-        self.duplicates_scroll.setStyleSheet("background: transparent;")
         self.duplicates_scroll.setWidget(self.duplicates_container)
         self.tabs.addTab(self.duplicates_scroll, "Duplicates")
 
@@ -277,12 +334,8 @@ class MainWindow(QWidget):
         self.uniques_ref_container = QWidget()
         self.uniques_ref_layout = QVBoxLayout(self.uniques_ref_container)
         self.uniques_ref_layout.setAlignment(Qt.AlignTop)
-        self.uniques_ref_layout.setContentsMargins(8, 8, 8, 8)
-        self.uniques_ref_layout.setSpacing(8)
         self.uniques_ref_scroll = QScrollArea()
         self.uniques_ref_scroll.setWidgetResizable(True)
-        self.uniques_ref_scroll.setFrameShape(QFrame.NoFrame)
-        self.uniques_ref_scroll.setStyleSheet("background: transparent;")
         self.uniques_ref_scroll.setWidget(self.uniques_ref_container)
         self.tabs.addTab(self.uniques_ref_scroll, "Uniques (Reference)")
 
@@ -290,79 +343,81 @@ class MainWindow(QWidget):
         self.uniques_work_container = QWidget()
         self.uniques_work_layout = QVBoxLayout(self.uniques_work_container)
         self.uniques_work_layout.setAlignment(Qt.AlignTop)
-        self.uniques_work_layout.setContentsMargins(8, 8, 8, 8)
-        self.uniques_work_layout.setSpacing(8)
         self.uniques_work_scroll = QScrollArea()
         self.uniques_work_scroll.setWidgetResizable(True)
-        self.uniques_work_scroll.setFrameShape(QFrame.NoFrame)
-        self.uniques_work_scroll.setStyleSheet("background: transparent;")
         self.uniques_work_scroll.setWidget(self.uniques_work_container)
         self.tabs.addTab(self.uniques_work_scroll, "Uniques (Working)")
 
-        # Make tabs occupy remaining vertical space
-        layout.addWidget(self.tabs, stretch=1)
+        layout.addWidget(self.tabs, 1)
 
-        # Footer
-        footer_sep = QFrame()
-        footer_sep.setFrameShape(QFrame.HLine)
-        footer_sep.setStyleSheet("color: rgba(255,255,255,0.03);")
-        layout.addWidget(footer_sep)
+        # Footer with action buttons and copyright
+        footer = QHBoxLayout()
+        # colorized buttons with icons and compact widths
+        delete_icon = get_icon("delete", QApplication.instance())
+        save_icon = get_icon("save", QApplication.instance())
+        move_icon = get_icon("move", QApplication.instance())
 
-        bulk_layout = QHBoxLayout()
-        self.delete_btn = QPushButton("🗑️ Delete All Duplicates")
-        self.delete_btn.setProperty("class", "glass")
-        self.keep_btn = QPushButton("✅ Keep All Duplicates")
-        self.keep_btn.setProperty("class", "glass")
-        self.save_uniques_btn = QPushButton("💾 Save Uniques to New Directory")
-
-        self.move_btn = QToolButton()
-        self.move_btn.setText("Move ▾")
-        self.move_btn.setPopupMode(QToolButton.InstantPopup)
-        self.move_menu = QMenu(self)
-        move_action = QAction("Move selected to folder...", self)
-        self.move_menu.addAction(move_action)
-        self.move_btn.setMenu(self.move_menu)
-        self.move_btn.setStyleSheet("QToolButton { padding:10px 16px; border-radius:10px; background: rgba(47,128,237,0.95); color:#fff; }")
-
-        self.delete_drop_btn = QToolButton()
-        self.delete_drop_btn.setText("Delete ▾")
-        self.delete_drop_btn.setPopupMode(QToolButton.InstantPopup)
-        self.delete_menu = QMenu(self)
-        del_action = QAction("Delete selected (move to Trash)", self)
-        self.delete_menu.addAction(del_action)
-        self.delete_drop_btn.setMenu(self.delete_menu)
-        self.delete_drop_btn.setStyleSheet("QToolButton { padding:10px 16px; border-radius:10px; background: rgba(235,87,87,0.95); color:#fff; }")
-
-        try:
-            for b in (self.move_btn, self.delete_drop_btn, self.search_btn, self.delete_btn, self.keep_btn, self.save_uniques_btn):
-                eff = QGraphicsDropShadowEffect(blurRadius=8, xOffset=0, yOffset=2)
-                b.setGraphicsEffect(eff)
-        except Exception:
-            pass
-
-        self.selected_count_lbl = QLabel("Selected: 0")
-
-        bulk_layout.addWidget(self.delete_btn)
-        bulk_layout.addWidget(self.keep_btn)
-        bulk_layout.addWidget(self.save_uniques_btn)
-        bulk_layout.addStretch()
-        bulk_layout.addWidget(self.move_btn)
-        bulk_layout.addWidget(self.delete_drop_btn)
-        bulk_layout.addWidget(self.selected_count_lbl)
-        layout.addLayout(bulk_layout)
-
-        # Connections
-        self.search_btn.clicked.connect(self.on_search_clicked)
+        self.delete_btn = make_button("", icon=delete_icon, style_class="danger", tooltip="Delete all duplicate working files")
         self.delete_btn.clicked.connect(self._on_delete_all_duplicates)
+        self.keep_btn = make_button("Keep", style_class="success", tooltip="Keep all duplicates (remove from view)")
         self.keep_btn.clicked.connect(self._on_keep_all_duplicates)
+        self.save_uniques_btn = make_button("", icon=save_icon, style_class="success", tooltip="Save uniques to folder")
         self.save_uniques_btn.clicked.connect(self._on_save_uniques)
-        move_action.triggered.connect(self._on_move_selected)
-        del_action.triggered.connect(self._on_delete_selected)
 
-        # internal state
+        # Make buttons compact
+        for b in (self.delete_btn, self.keep_btn, self.save_uniques_btn):
+            b.setMaximumWidth(140)
+            b.setMinimumWidth(32)
+
+        self.move_btn = make_button("", icon=move_icon, style_class="neutral", tooltip="Move selected")
+        self.move_btn.setMaximumWidth(120)
+        self.move_btn.clicked.connect(self._on_move_selected)
+
+        self.delete_drop_btn = make_button("", icon=delete_icon, style_class="danger", tooltip="Delete selected (move to Trash)")
+        self.delete_drop_btn.clicked.connect(self._on_delete_selected)
+
+        footer.addWidget(self.delete_btn)
+        footer.addWidget(self.keep_btn)
+        footer.addWidget(self.save_uniques_btn)
+        footer.addStretch()
+        footer.addWidget(self.move_btn)
+        footer.addWidget(self.delete_drop_btn)
+
+        # Copyright label at right bottom
+        self.footer_label = QLabel("© Mufaddal Kothari")
+        self.footer_label.setObjectName("footer_label")
+        footer.addWidget(self.footer_label)
+
+        layout.addLayout(footer)
+
+        # Connections for thread results
         self._thread = None
         self._last_results = None
         self._selected_paths = set()
+
+    # --- style/theme helpers ---
+    def _apply_styles(self, style_text: str):
+        try:
+            self.setStyleSheet(style_text)
+        except Exception:
+            logger.exception("Failed to apply styles")
+
+    def _toggle_theme(self):
+        self._theme = "dark" if self._theme != "dark" else "light"
+        self._settings.setValue("theme", self._theme)
+        if self._theme == "dark":
+            self.theme_btn.setText("🌙")
+            self._apply_styles(DARK_STYLE)
+        else:
+            self.theme_btn.setText("☀️")
+            self._apply_styles(GLASSY_STYLE)
+
+    # --- persistence helpers ---
+    def _save_ref_setting(self):
+        self._settings.setValue("last_ref", self.ref_dir.text().strip())
+
+    def _save_work_setting(self):
+        self._settings.setValue("last_work", self.work_dir.text().strip())
 
     # --- UI helpers ---
     def _open_hash_info(self):
@@ -374,25 +429,25 @@ class MainWindow(QWidget):
         dlg.setFileMode(QFileDialog.Directory)
         if dlg.exec_():
             target_line_edit.setText(dlg.selectedFiles()[0])
+            if target_line_edit is self.ref_dir:
+                self._save_ref_setting()
+            else:
+                self._save_work_setting()
 
     def _on_field_toggled(self, checked: bool):
         any_checked = any(act.isChecked() for act in self.field_actions.values())
-        # disable hash controls when fields are selected
         self.hash_cb.setEnabled(not any_checked)
         self.sim_slider.setEnabled(not any_checked)
         self.hash_info_btn.setEnabled(not any_checked)
         if any_checked and self.hash_cb.isChecked():
-            # if hash was checked earlier, uncheck it to keep mutual exclusivity
             self.hash_cb.setChecked(False)
 
     def _on_hash_toggled(self, state: int):
         checked = state == Qt.Checked
-        # disable field selector when hashing enabled
         self.field_selector_btn.setEnabled(not checked)
         for act in self.field_actions.values():
             act.setEnabled(not checked)
         if checked:
-            # clear any active field checks to avoid ambiguity
             for act in self.field_actions.values():
                 if act.isChecked():
                     act.setChecked(False)
@@ -405,19 +460,23 @@ class MainWindow(QWidget):
         ref = self.ref_dir.text().strip()
         work = self.work_dir.text().strip()
         if not ref or not work:
-            # Clear tabs and show message in Duplicates tab
             self._clear_all_tabs()
             self._add_label_to_layout(self.duplicates_layout, "Please select both reference and working directories.")
             return
+
+        # Save last used folders
+        self._save_ref_setting()
+        self._save_work_setting()
+        self._settings.setValue("similarity", self.sim_slider.value())
 
         fields = self._get_selected_fields()
         criteria = {
             "fields": fields,
             "size": False,
             "name": False,
-            "metadata": True,  # comparator ignores metadata fallback when hashing is requested
+            "metadata": True,
             "hash": self.hash_cb.isChecked(),
-            "hash_size": None,  # comparator will use DEFAULT_HASH_SIZE (16) permanently
+            "hash_size": None,
             "similarity": int(self.sim_slider.value()) if self.hash_cb.isChecked() else None,
         }
 
@@ -436,9 +495,8 @@ class MainWindow(QWidget):
     def _on_progress(self, value: int):
         self.progress.setValue(value)
 
-    # --- Results rendering & actions (now tab-aware) ---
+    # --- Results rendering & actions (tab-aware) ---
     def _on_results_ready(self, payload: dict):
-        # payload contains duplicates, unique_in_ref, unique_in_work and criteria
         self._last_results = payload
         self._selected_paths.clear()
         self._update_selected_count()
@@ -447,7 +505,7 @@ class MainWindow(QWidget):
         unique_in_ref = payload.get("unique_in_ref", [])
         unique_in_work = payload.get("unique_in_work", [])
 
-        # Populate tabs once (no recompute on tab switch)
+        # Populate tabs once
         self._clear_all_tabs()
         if duplicates:
             self._add_label_to_layout(self.duplicates_layout, "<b>Duplicates / Matches</b>")
@@ -456,7 +514,6 @@ class MainWindow(QWidget):
         else:
             self._add_label_to_layout(self.duplicates_layout, "No duplicates found.")
 
-        # Uniques (Reference)
         self._add_label_to_layout(self.uniques_ref_layout, "<b>Uniques (Reference)</b>")
         if unique_in_ref:
             for f in unique_in_ref:
@@ -464,7 +521,6 @@ class MainWindow(QWidget):
         else:
             self._add_label_to_layout(self.uniques_ref_layout, "<i>No unique files found in Reference</i>")
 
-        # Uniques (Working)
         self._add_label_to_layout(self.uniques_work_layout, "<b>Uniques (Working)</b>")
         if unique_in_work:
             for f in unique_in_work:
@@ -472,10 +528,10 @@ class MainWindow(QWidget):
         else:
             self._add_label_to_layout(self.uniques_work_layout, "<i>No unique files found in Working</i>")
 
-        # Select first tab by default (duplicates)
+        # Select duplicates tab by default
         self.tabs.setCurrentIndex(0)
 
-    # Helpers to manage tab contents
+    # Tab layout helpers
     def _clear_all_tabs(self):
         for layout in (self.duplicates_layout, self.uniques_ref_layout, self.uniques_work_layout):
             while layout.count():
@@ -485,13 +541,15 @@ class MainWindow(QWidget):
                     w.deleteLater()
 
     def _add_label_to_layout(self, layout, text):
-        lbl = QLabel(text)
+        lbl = QLabel()
+        lbl.setText(text)
         lbl.setWordWrap(True)
         layout.addWidget(lbl)
 
     def _add_duplicate_widget_to_layout(self, layout, r: ImageFileObj, w: ImageFileObj, reasons: List[str]):
         row = QFrame()
         row.setFrameShape(QFrame.StyledPanel)
+        row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
         row_layout = QHBoxLayout(row)
         cb_r = QCheckBox()
         cb_r.stateChanged.connect(lambda s, p=r.path: self._on_path_toggled(p, s))
@@ -500,45 +558,48 @@ class MainWindow(QWidget):
         thumb_r = QLabel()
         pixr = QPixmap(r.path)
         if not pixr.isNull():
-            thumb_r.setPixmap(pixr.scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb_r.setPixmap(pixr.scaled(92, 92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             thumb_r.setText("No preview")
         thumb_w = QLabel()
         pixw = QPixmap(w.path)
         if not pixw.isNull():
-            thumb_w.setPixmap(pixw.scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb_w.setPixmap(pixw.scaled(92, 92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             thumb_w.setText("No preview")
         info_lbl = QLabel(f"Ref: {r.path}\nWork: {w.path}\nMatch: {', '.join(reasons)}")
-        compare_btn = QPushButton("Compare")
+        info_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        compare_btn = make_button("", icon=get_icon("open", QApplication.instance()), style_class="neutral", tooltip="Compare files")
         compare_btn.clicked.connect(lambda _, a=r, b=w, rs=reasons: self._open_compare_modal(a, b, rs))
         row_layout.addWidget(cb_r)
         row_layout.addWidget(thumb_r)
         row_layout.addWidget(cb_w)
         row_layout.addWidget(thumb_w)
-        row_layout.addWidget(info_lbl)
+        row_layout.addWidget(info_lbl, 1)
         row_layout.addWidget(compare_btn)
         layout.addWidget(row)
 
     def _add_unique_widget_to_layout(self, layout, f: ImageFileObj, side: str = "ref"):
         row = QFrame()
         row.setFrameShape(QFrame.StyledPanel)
+        row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
         row_layout = QHBoxLayout(row)
         cb = QCheckBox()
         cb.stateChanged.connect(lambda s, p=f.path: self._on_path_toggled(p, s))
         thumb = QLabel()
         pix = QPixmap(f.path)
         if not pix.isNull():
-            thumb.setPixmap(pix.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb.setPixmap(pix.scaled(112, 112, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         else:
             thumb.setText("No preview")
         info_lbl = QLabel()
         info_lbl.setText(f"{'Reference' if side == 'ref' else 'Working'} unique\nName: {f.name}\nSize: {f.size}\nDims: {f.dimensions}\nPath: {f.path}")
-        open_btn = QPushButton("Open")
+        info_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        open_btn = make_button("", icon=get_icon("open", QApplication.instance()), style_class="neutral", tooltip="Open file")
         open_btn.clicked.connect(lambda _, p=f.path: os.startfile(p) if os.path.exists(p) else None)
         row_layout.addWidget(cb)
         row_layout.addWidget(thumb)
-        row_layout.addWidget(info_lbl)
+        row_layout.addWidget(info_lbl, 1)
         row_layout.addWidget(open_btn)
         layout.addWidget(row)
 
@@ -550,7 +611,8 @@ class MainWindow(QWidget):
         self._update_selected_count()
 
     def _update_selected_count(self):
-        self.selected_count_lbl.setText(f"Selected: {len(self._selected_paths)}")
+        # Keep footer label as the selection count (not replacing copyright)
+        self.footer_label.setText(f"© Mufaddal Kothari    Selected: {len(self._selected_paths)}")
 
     def _open_compare_modal(self, ref_file: ImageFileObj, work_file: ImageFileObj, reasons: List[str]):
         meta1 = {
@@ -776,7 +838,6 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Done", "Selected files moved to Trash.")
 
     def _clear_results(self):
-        # kept for compatibility, clear all tabs
         self._clear_all_tabs()
 
     def _on_search_finished(self):
