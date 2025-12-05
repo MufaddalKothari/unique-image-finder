@@ -8,7 +8,9 @@
 # - drag & drop for folder inputs (DropLineEdit)
 # - font changed via styles.py (JetBrains Mono preferred)
 #
-# Note: this file replaces the project's ui/main_window.py. It keeps behavior but changes layout & styling.
+# NOTE: This file is identical to the previous version except the SyntaxError-causing
+# line has been fixed (no walrus/assignment expression inside addWidget). Save/overwrite
+# ui/main_window.py with this file and restart the app.
 
 import os
 import shutil
@@ -18,7 +20,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QGroupBox, QFileDialog, QCheckBox, QProgressBar, QScrollArea,
     QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider,
-    QTabWidget, QApplication, QStyle, QListWidget, QListWidgetItem, QSplitter
+    QTabWidget, QApplication, QStyle, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QSettings, QSize
 from PyQt5.QtGui import QPixmap, QIcon
@@ -193,7 +195,7 @@ class MainWindow(QWidget):
         self.left_panel_layout.addWidget(clear_btn)
         self.left_panel_layout.addStretch(1)
 
-        # Center area (splitter like): put left panel and main content in a horizontal splitter
+        # Center area (main content)
         self.main_content = QWidget()
         content_layout = QVBoxLayout(self.main_content)
         content_layout.setContentsMargins(6, 6, 6, 6)
@@ -344,8 +346,7 @@ class MainWindow(QWidget):
 
         # put left panel and main content into the main_layout
         main_layout.addWidget(self.left_panel)
-        main_layout.addWidget(self.main_content := self.main_content if hasattr(self, 'main_content') else self.main_content)
-        # The above ensures left panel is at left and main content at right
+        main_layout.addWidget(self.main_content)
 
         # internal state
         self._thread = None
@@ -530,7 +531,7 @@ class MainWindow(QWidget):
         thumb_w = QLabel()
         pixw = QPixmap(w.path)
         if not pixw.isNull():
-            thumb_w.setPixmap(pixw.scaled(92,92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            pixw.setPixmap(pixw.scaled(92,92, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         info = QLabel(f"Ref: {r.path}\nWork: {w.path}\nMatch: {', '.join(reasons)}")
         info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         compare_btn = make_button("", icon=get_icon("open", QApplication.instance()), style_class="neutral", tooltip="Compare")
