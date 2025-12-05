@@ -482,7 +482,22 @@ class MainWindow(QWidget):
             self.progress.setValue(v)
         except Exception:
             pass
+    def _on_tab_changed(self, index: int):
+        """
+        Called when the user switches tabs.
 
+        Kept intentionally lightweight (no-op) to avoid side-effects; this fixes the
+        AttributeError caused by connecting to a missing handler. If you want visual
+        changes when tabs switch (e.g. refresh contents, lazy-load thumbnails), we
+        can implement them here later.
+        """
+        try:
+            # If you want to show a short summary in the footer or refresh the visible tab,
+            # do it here. For now we keep it a no-op to prevent crashes.
+            return
+        except Exception:
+            logger.exception("Error inside _on_tab_changed")
+            return
     def _on_results_ready(self, payload: dict):
         self._last_results = payload
         self._selected_paths.clear()
