@@ -482,6 +482,51 @@ class MainWindow(QWidget):
             self.progress.setValue(v)
         except Exception:
             pass
+    def _on_delete_all_duplicates(self):
+        """
+        Delete all duplicate working files shown in the current results (move them to Trash).
+        This method is safe if no results exist and reports any errors to the user.
+        """
+        # No-results guard
+        if not getattr(self, "_last_results", None):
+            QMessageBox.information(self, "No results", "No search results.")
+            return
+
+        duplicates = self._last_results.get("duplicates", [])
+        if not duplicates:
+            QMessageBox.information(self, "No duplicates", "No duplicates found.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm delete all duplicates",
+            "Delete all duplicate working files? (Will move to Trash)",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Collect working-file paths to delete
+        to_delete = [w.path for (r, w, _) in duplicates if getattr(w, "path", None)]
+
+        errors = []
+        for p in to_delete:
+            try:
+                if os.path.exists(p):
+                    send2trash(p)
+            except Exception as e:
+                errors.append((p, str(e)))
+
+        # Remove widgets for deleted paths from all tabs
+        try:
+            self._remove_widgets_for_paths(to_delete)
+        except Exception:
+            logger.exception("Failed to remove widgets for deleted paths")
+
+        if errors:
+            QMessageBox.warning(self, "Delete errors", f"Some files could not be moved to Trash:\n{errors}")
+        else:
+            QMessageBox.information(self, "Done", "All duplicate working files moved to Trash.")
     def _on_tab_changed(self, index: int):
         """
         Called when the user switches tabs.
