@@ -229,6 +229,29 @@ class CacheDB:
             self._conn.commit()
             cur.close()
 
+    def get_hashes_for_paths(self, paths: List[str], hash_size: Optional[int] = None) -> Dict[str, str]:
+        """
+        Return a dict path -> hash_hex for the given paths if present in DB.
+        If hash_size is provided, prefer rows with that hash_size (otherwise return any).
+        """
+        if not paths:
+            return {}
+        with self._lock:
+            cur = self._conn.cursor()
+            placeholders = ",".join("?" for _ in paths)
+            if hash_size is not None:
+                query = f"SELECT path, hash_hex FROM files WHERE path IN ({placeholders}) AND hash_size = ?"
+                cur.execute(query, (*paths, int(hash_size)))
+            else:
+                query = f"SELECT path, hash_hex FROM files WHERE path IN ({placeholders})"
+                cur.execute(query, tuple(paths))
+            out = {}
+            for r in cur.fetchall():
+                if r["hash_hex"]:
+                    out[r["path"]] = r["hash_hex"]
+            cur.close()
+            return out
+
     def close(self):
         try:
             self._conn.close()

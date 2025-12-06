@@ -186,11 +186,6 @@ class MainWindow(QWidget):
         self.left_toggle_btn.setVisible(False)
         self.left_toggle_btn.clicked.connect(self._show_left_panel)
         main_layout.addWidget(self.left_toggle_btn)
-        self.cached_btn = QPushButton("Cached")
-        self.cached_btn.setObjectName("cached_btn")
-        self.cached_btn.setToolTip("Open cached directories manager")
-        self.left_panel_layout.insertWidget(1, self.cached_btn)  # or appropriate position
-        self.cached_btn.clicked.connect(self._open_cached_modal)
         # left panel
         self.left_panel = QFrame()
         self.left_panel.setObjectName("left_panel")
@@ -200,6 +195,12 @@ class MainWindow(QWidget):
         lp_layout.setContentsMargins(8, 8, 8, 8)
         lp_layout.setSpacing(6)
 
+        self.cached_btn = QPushButton("Cached")
+        self.cached_btn.setObjectName("cached_btn")
+        self.cached_btn.setToolTip("Open cached directories manager")
+        lp_layout.insertWidget(1, self.cached_btn)  # or appropriate position
+        self.cached_btn.clicked.connect(self._open_cached_modal)
+        
         # collapse button inside panel
         self.collapse_btn = QToolButton()
         self.collapse_btn.setObjectName("collapse_btn")

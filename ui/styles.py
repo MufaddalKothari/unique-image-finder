@@ -1,6 +1,12 @@
 # ui/styles.py
-# Centralized style tokens used by the UI.
-# Updated per latest requests and to style the left-panel toggles + progress bar.
+# Centralized style tokens used by the UI (regenerated).
+# - Glassy light and dark themes
+# - Ubuntu Mono primary font (with fallbacks)
+# - Curved modern scrollbars
+# - Styled cached-dir controls with distinct colors
+# - Styled left-panel toggle buttons (curved)
+#
+# Note: Keep Qt stylesheet-compatible properties only.
 
 FONT_FAMILY = '"Ubuntu Mono", "JetBrains Mono", "Fira Mono", "IBM Plex Mono", "Menlo", "Consolas", monospace'
 
@@ -15,9 +21,9 @@ QWidget {{
     font-size: 13px;
 }}
 
-/* Group boxes and panes: slightly translucent and uniform */
+/* Group boxes and panes */
 QGroupBox {{
-    background: rgba(255,255,255,0.92);
+    background: rgba(255,255,255,0.94);
     border-radius: 10px;
     padding: 8px;
     margin-top: 6px;
@@ -26,15 +32,15 @@ QGroupBox {{
 
 /* Left panel */
 #left_panel {{
-    background: rgba(255,255,255,0.94);
+    background: rgba(255,255,255,0.96);
     border: 1px solid rgba(12,15,20,0.04);
-    border-radius: 8px;
-    padding: 6px;
+    border-radius: 10px;
+    padding: 8px;
 }}
 
 /* Left-toggle and collapse buttons (modern curved) */
 QToolButton#left_toggle_btn, QToolButton#collapse_btn {{
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(255,255,255,0.95), stop:1 rgba(245,247,250,0.95));
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 rgba(255,255,255,0.96), stop:1 rgba(247,249,251,0.96));
     border: 1px solid rgba(12,15,20,0.06);
     border-radius: 10px;
     padding: 6px 8px;
@@ -84,7 +90,7 @@ QTabBar::tab:hover {{
 /* Buttons */
 QPushButton {{
     min-height: 30px;
-    padding: 6px 10px;
+    padding: 6px 12px;
     border-radius: 8px;
     color: #fff;
     font-weight: 700;
@@ -101,7 +107,7 @@ QPushButton.danger {{ background: qlineargradient(spread:pad, x1:0,y1:0,x2:1,y2:
 QPushButton.success {{ background: qlineargradient(spread:pad, x1:0,y1:0,x2:1,y2:0, stop:0 #12b886, stop:1 #0fa57a); }}
 QPushButton.neutral {{ background: rgba(15,23,32,0.06); color:#0f1720; font-weight:700; }}
 
-/* Small tool buttons (compare fields / theme / info) */
+/* Tool buttons (compare fields / theme / info) */
 QToolButton#field_selector_btn, QToolButton#theme_toggle_btn, QToolButton#info_btn {{
     background: rgba(255,255,255,0.88);
     border-radius: 8px;
@@ -135,16 +141,68 @@ QLineEdit {{
 }}
 
 /* Modern curved scrollbars */
-QScrollBar:vertical {{ background: transparent; width: 12px; margin: 6px 0 6px 0; }}
-QScrollBar::handle:vertical {{ background: rgba(0,0,0,0.15); min-height: 20px; border-radius: 6px; }}
-QScrollBar::handle:vertical:hover {{ background: rgba(0,0,0,0.22); }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-QScrollBar:horizontal {{ background: transparent; height: 12px; margin: 0 6px 0 6px; }}
-QScrollBar::handle:horizontal {{ background: rgba(0,0,0,0.15); min-width: 20px; border-radius: 6px; }}
-QScrollBar::handle:horizontal:hover {{ background: rgba(0,0,0,0.22); }}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 12px;
+    margin: 6px 0 6px 0;
+}}
+QScrollBar::handle:vertical {{
+    background: rgba(0,0,0,0.15);
+    min-height: 20px;
+    border-radius: 6px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: rgba(0,0,0,0.22);
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0px;
+}}
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 12px;
+    margin: 0 6px 0 6px;
+}}
+QScrollBar::handle:horizontal {{
+    background: rgba(0,0,0,0.15);
+    min-width: 20px;
+    border-radius: 6px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: rgba(0,0,0,0.22);
+}}
+
+/* Cached directories controls - colored glassy buttons */
+QPushButton#cached_btn {{
+    background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #06b6d4, stop:1 #0ea5b7);
+    color: #ffffff;
+    border-radius: 8px;
+}}
+QPushButton#cache_add_btn {{
+    background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669);
+    color: #fff;
+    border-radius: 8px;
+}}
+QPushButton#cache_refresh_btn {{
+    background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #f59e0b, stop:1 #d97706);
+    color: #fff;
+    border-radius: 8px;
+}}
+QPushButton#cache_rehash_btn {{
+    background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 #60a5fa, stop:1 #3b82f6);
+    color: #fff;
+    border-radius: 8px;
+}}
+QPushButton#cache_open_btn {{
+    background: rgba(15,23,42,0.06);
+    color: #0f1720;
+    border-radius: 8px;
+}}
 
 /* Footer */
-#footer_label {{ color: rgba(15,23,32,0.65); font-size: 12px; }}
+#footer_label {{
+    color: rgba(15,23,32,0.65);
+    font-size: 12px;
+}}
 """
 
 DARK_STYLE = rf"""
@@ -154,14 +212,17 @@ QWidget {{
     font-family: {FONT_FAMILY};
     font-size: 13px;
 }}
-#left_panel {{ background: rgba(20,22,26,0.6); border:1px solid rgba(255,255,255,0.02); border-radius:8px; padding:6px; }}
+#left_panel {{ background: rgba(20,22,26,0.6); border:1px solid rgba(255,255,255,0.02); border-radius:10px; padding:8px; }}
 QTabWidget::pane {{ background: rgba(8,10,14,0.6); border-radius: 12px; padding: 10px; }}
 QTabBar::tab {{ background: rgba(24,26,30,0.9); color:#e6eef5; padding:8px 12px; min-width:90px; max-width:220px; border-top-left-radius:8px; border-top-right-radius:8px; }}
 QTabBar::tab:selected {{ background: rgba(34,36,42,1.0); }}
 QPushButton#search_btn {{ background: qlineargradient(spread:pad, x1:0,y1:0,x2:1,y2:0, stop:0 #2563eb, stop:1 #1e40af); color:#fff; }}
 QToolButton#field_selector_btn, QToolButton#theme_toggle_btn, QToolButton#info_btn {{ background: rgba(30,32,36,0.6); border-radius:8px; padding:6px 10px; color:#e6eef5; }}
 QToolButton#left_toggle_btn, QToolButton#collapse_btn {{ background: rgba(30,32,36,0.6); border-radius:10px; padding:6px 8px; color:#e6eef5; }}
-QScrollBar:vertical {{ background: transparent; width: 12px; margin: 6px 0 6px 0; }}
-QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.08); min-height: 20px; border-radius:6px; }}
+QPushButton#cached_btn {{ background: qlineargradient(spread:pad, x1:0,y1:0,x2:1,y2:0, stop:0 #0891b2, stop:1 #0ea5b7); color:#fff; border-radius:8px; }}
+QPushButton#cache_add_btn {{ background: qlineargradient(spread:pad, x1:0,y1:0,x2:1,y2:0, stop:0 #059669, stop:1 #10b981); color:#fff; border-radius:8px; }}
+QPushButton#cache_refresh_btn {{ background: #b45309; color:#fff; border-radius:8px; }}
+QPushButton#cache_rehash_btn {{ background: #2563eb; color:#fff; border-radius:8px; }}
+QPushButton#cache_open_btn {{ background: rgba(255,255,255,0.03); color:#e6eef5; border-radius:8px; }}
 #footer_label {{ color: rgba(230,238,245,0.6); font-size:12px; }}
 """
