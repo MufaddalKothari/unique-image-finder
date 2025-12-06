@@ -1,12 +1,9 @@
-# core/cache_db.py
-# Extended CacheDB with prefix lookup helper(s) to support fast candidate selection by prefix.
-
 import os
 import sqlite3
 import json
 import time
 import threading
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser("~"), ".unique_image_finder", "cache.db")
 
@@ -113,28 +110,6 @@ class CacheDB:
             cur.close()
             return dict(r) if r else None
 
-    def find_dir_for_path(self, path: str) -> Optional[Dict[str, Any]]:
-        """
-        Return the best matching dir row whose path is a prefix of the given path.
-        If multiple dirs match, the longest-path match is returned.
-        """
-        normalized = os.path.normpath(path)
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute("SELECT * FROM dirs")
-            best = None
-            best_len = -1
-            for r in cur.fetchall():
-                dpath = os.path.normpath(r["path"])
-                # ensure the match boundaries (path separator) - so "/a/b" doesn't match "/a/ba"
-                if normalized.startswith(dpath):
-                    l = len(dpath)
-                    if l > best_len:
-                        best = dict(r)
-                        best_len = l
-            cur.close()
-            return best
-
     def remove_dir(self, dir_id: int):
         with self._lock:
             cur = self._conn.cursor()
@@ -173,37 +148,6 @@ class CacheDB:
             )
             self._conn.commit()
             cur.close()
-
-    def upsert_files_bulk(self, rows: List[Dict[str, Any]]):
-        """
-        Bulk upsert for a list of rows with keys:
-          path, dir_id, size, mtime, hash_hex, prefix, hash_size
-        Performs a single transaction for efficiency.
-        """
-        if not rows:
-            return
-        with self._lock:
-            cur = self._conn.cursor()
-            now = int(time.time())
-            cur.execute("BEGIN")
-            try:
-                stmt = """
-                    INSERT INTO files (path, dir_id, size, mtime, hash_hex, prefix, hash_size, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', ?)
-                    ON CONFLICT(path) DO UPDATE SET
-                        size=excluded.size, mtime=excluded.mtime, hash_hex=excluded.hash_hex,
-                        prefix=excluded.prefix, hash_size=excluded.hash_size, status='ok', updated_at=excluded.updated_at
-                """
-                params = []
-                for r in rows:
-                    params.append((r["path"], r["dir_id"], r["size"], r["mtime"], r.get("hash_hex"), r.get("prefix"), r.get("hash_size", 16), now))
-                cur.executemany(stmt, params)
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
-            finally:
-                cur.close()
 
     def delete_files_for_dir(self, dir_id: int, paths: Optional[List[str]] = None):
         with self._lock:
@@ -307,21 +251,6 @@ class CacheDB:
                     out[r["path"]] = r["hash_hex"]
             cur.close()
             return out
-
-    def get_candidates_by_prefix(self, dir_id: int, prefix: int, limit: int = 500) -> List[Tuple[str, str]]:
-        """
-        Return up to `limit` candidates for a given dir_id and prefix.
-        Each item is (path, hash_hex).
-        """
-        with self._lock:
-            cur = self._conn.cursor()
-            cur.execute(
-                "SELECT path, hash_hex FROM files WHERE dir_id = ? AND prefix = ? AND hash_hex IS NOT NULL LIMIT ?",
-                (dir_id, prefix, limit),
-            )
-            rows = [(r["path"], r["hash_hex"]) for r in cur.fetchall()]
-            cur.close()
-            return rows
 
     def close(self):
         try:
