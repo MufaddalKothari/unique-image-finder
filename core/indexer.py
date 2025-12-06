@@ -1,12 +1,5 @@
-"""
-Simple background indexing worker.
-
-- Polls CacheDB job queue (jobs table).
-- For index / refresh / rehash jobs, computes dhash using Pillow + imagehash via a ThreadPoolExecutor.
-- Writes results back to CacheDB in batches.
-
-This is a straightforward single-process worker designed for desktop use.
-"""
+# core/indexer.py
+# Background indexing worker - updated to populate HashStore with computed hashes.
 import os
 import time
 import threading
@@ -20,6 +13,12 @@ from core.cache_db import CacheDB
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Optional transient hash cache used by comparator. If available, indexer will populate it.
+try:
+    from core.hashstore import HashStore
+except Exception:
+    HashStore = None
 
 
 def _compute_dhash(path: str, hash_size: int = 16) -> Dict[str, Any]:
@@ -57,6 +56,16 @@ class Indexer:
         self.hash_size = 16
         self.prefix_bits_default = 16
 
+        # optional HashStore client (transient cache)
+        self._hashstore = None
+        if HashStore is not None:
+            try:
+                self._hashstore = HashStore()
+                logger.debug("Indexer: HashStore client initialized")
+            except Exception:
+                logger.debug("Indexer: failed to initialize HashStore client; continuing without it")
+                self._hashstore = None
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -71,6 +80,15 @@ class Indexer:
             self._thread.join(timeout=2.0)
         try:
             self._executor.shutdown(wait=False)
+        except Exception:
+            pass
+        # close hashstore if we opened one
+        try:
+            if self._hashstore:
+                try:
+                    self._hashstore.close()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -89,7 +107,6 @@ class Indexer:
             except Exception as e:
                 logger.exception("Job failed: %s", e)
                 self.db.update_job_state(job["job_id"], "failed", last_error=str(e))
-            # small sleep to yield
             time.sleep(0.05)
 
     def _run_job(self, job: Dict[str, Any]):
@@ -153,19 +170,41 @@ class Indexer:
                 fmeta = futures[fut]
                 res = fut.result()
                 if "error" in res:
-                    # upsert as error status
+                    # upsert as error status (no hash)
                     self.db.upsert_file(fmeta["path"], dir_id, fmeta["size"], fmeta["mtime"], None, None, self.hash_size)
                 else:
                     hexv = res["hex"]
                     intv = res["int"]
-                    prefix = intv >> (self.hash_size * self.hash_size - self.prefix_bits_default) if self.prefix_bits_default < (self.hash_size*self.hash_size) else intv
+                    # compute prefix safely: cap shift amount
+                    num_bits = self.hash_size * self.hash_size
+                    if self.prefix_bits_default < num_bits:
+                        prefix = intv >> (num_bits - self.prefix_bits_default)
+                    else:
+                        prefix = intv
+                    # persist to CacheDB
                     self.db.upsert_file(fmeta["path"], dir_id, fmeta["size"], fmeta["mtime"], hexv, prefix, self.hash_size)
+                    # ALSO populate transient HashStore so comparator reuses persisted hashes
+                    if self._hashstore is not None:
+                        try:
+                            # HashStore.set expects an ImageHash or hex depending on implementation; many implementations accept hex
+                            # We try to convert hex->ImageHash if hashstore expects an object. Use a safe call.
+                            try:
+                                img_hash = imagehash.hex_to_hash(hexv)
+                                self._hashstore.set(fmeta["path"], img_hash, self.hash_size)
+                            except Exception:
+                                # fallback to storing hex string
+                                try:
+                                    self._hashstore.set(fmeta["path"], hexv, self.hash_size)
+                                except Exception:
+                                    logger.debug("Indexer: failed to write hashstore for %s", fmeta["path"])
+                        except Exception:
+                            logger.debug("Indexer: HashStore.set failed for %s", fmeta["path"])
                 processed += 1
                 self.db.update_job_progress(job_id, processed / total)
         self.db.update_dir_status(dir_id, "idle", last_indexed=int(time.time()))
 
     def _run_refresh(self, dir_id: int, job_id: int):
-        # For simplicity, refresh calls index run (incremental behavior above)
+        # For simplicity reuse index behavior (incremental)
         self._run_index(dir_id, job_id)
 
     def _run_rehash(self, dir_id: int, job_id: int):
@@ -186,13 +225,26 @@ class Indexer:
                 else:
                     hexv = res["hex"]
                     intv = res["int"]
-                    prefix = intv >> (self.hash_size * self.hash_size - self.prefix_bits_default) if self.prefix_bits_default < (self.hash_size*self.hash_size) else intv
+                    num_bits = self.hash_size * self.hash_size
+                    if self.prefix_bits_default < num_bits:
+                        prefix = intv >> (num_bits - self.prefix_bits_default)
+                    else:
+                        prefix = intv
                     self.db.upsert_file(row["path"], dir_id, row.get("size", 0), row.get("mtime", 0), hexv, prefix, self.hash_size)
+                    # populate HashStore as well
+                    if self._hashstore is not None:
+                        try:
+                            img_hash = imagehash.hex_to_hash(hexv)
+                            self._hashstore.set(row["path"], img_hash, self.hash_size)
+                        except Exception:
+                            try:
+                                self._hashstore.set(row["path"], hexv, self.hash_size)
+                            except Exception:
+                                logger.debug("Indexer: failed to write hashstore for %s", row["path"])
                 processed += 1
                 self.db.update_job_progress(job_id, processed / total)
         self.db.update_dir_status(dir_id, "idle", last_indexed=int(time.time()))
 
     def _run_gc(self, job_id: int):
-        # simple no-op for now; could remove missing rows older than threshold
         time.sleep(0.1)
         self.db.update_job_state(job_id, "completed", progress=1.0)
