@@ -25,7 +25,9 @@ from .styles import GLASSY_STYLE, DARK_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
 from send2trash import send2trash
-
+from core.cache_db import CacheDB
+from core.indexer import Indexer
+from .cached_dirs_modal import CachedDirsModal
 logger = logging.getLogger(__name__)
 
 
@@ -151,6 +153,9 @@ class MainWindow(QWidget):
         self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         theme = self._settings.value("theme", "light")
         self._apply_theme(theme)
+        self._cache_db = CacheDB()
+        self._indexer = Indexer(self._cache_db)
+        self._indexer.start()
         # internal state
         self._thread = None
         self._last_results = None
@@ -181,7 +186,11 @@ class MainWindow(QWidget):
         self.left_toggle_btn.setVisible(False)
         self.left_toggle_btn.clicked.connect(self._show_left_panel)
         main_layout.addWidget(self.left_toggle_btn)
-
+        self.cached_btn = QPushButton("Cached")
+        self.cached_btn.setObjectName("cached_btn")
+        self.cached_btn.setToolTip("Open cached directories manager")
+        self.left_panel_layout.insertWidget(1, self.cached_btn)  # or appropriate position
+        self.cached_btn.clicked.connect(self._open_cached_modal)
         # left panel
         self.left_panel = QFrame()
         self.left_panel.setObjectName("left_panel")
@@ -459,7 +468,11 @@ class MainWindow(QWidget):
         self.sim_slider.setEnabled(not any_checked)
         if any_checked and self.hash_cb.isChecked():
             self.hash_cb.setChecked(False)
-
+            # Cached Model
+    def _open_cached_modal(self):
+        dlg = CachedDirsModal(self._cache_db, self._indexer, parent=self)
+        dlg.exec_()
+        # refresh UI if needed after dialog closes
     # ---------- search flow ----------
     def on_search_clicked(self):
         ref = self.ref_dir.text().strip()
