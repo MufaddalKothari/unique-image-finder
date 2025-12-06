@@ -7,7 +7,7 @@
 # - Uses HashStore for transient in-memory or on-disk cache (if available)
 # - Consults CacheDB (if available) to reuse persisted dhash hex values
 # - Computes missing hashes in a ThreadPoolExecutor (safe on macOS)
-# - Uses integer popcount((a ^ b)) for Hamming distance checks
+# - Uses integer popcount((a ^ b)) for Hamming distance checks with a compatibility fallback
 #
 # The code is defensive: if CacheDB or HashStore are missing it still works.
 
@@ -101,8 +101,21 @@ def _imagehash_to_int(h: imagehash.ImageHash) -> int:
     return int(str(h), 16)
 
 
+def _popcount(n: int) -> int:
+    """
+    Portable popcount (works on Python versions without int.bit_count).
+    n is non-negative (we call on XOR results).
+    """
+    try:
+        return n.bit_count()  # Python 3.8+
+    except AttributeError:
+        # fallback for older Python: use bin
+        return bin(n).count("1")
+
+
 def _hamming_distance_int(a: int, b: int) -> int:
-    return (a ^ b).bit_count()
+    x = a ^ b
+    return _popcount(x)
 
 
 def _max_hamming_from_similarity(hash_bits: int, similarity_percent: float) -> int:
@@ -243,8 +256,6 @@ def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[
         if not wp or wp not in work_int_map:
             continue
         wint = work_int_map[wp]
-        best_match = None
-        best_dist = None
         for r_obj in ref_files:
             rp = getattr(r_obj, "path", None)
             if not rp or rp not in ref_int_map:
@@ -254,7 +265,6 @@ def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[
             if dist <= max_hamming:
                 # record match; could include other reasons/details
                 matches.append((r_obj, w_obj, [f"dhash:{dist}"]))
-                # Do not break; allow multiple matches if desired. Here we add the first that meets threshold.
                 break
 
     return matches
