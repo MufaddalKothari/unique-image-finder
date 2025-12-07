@@ -151,18 +151,4 @@ Tuning tips:
 - File permission errors when deleting or copying: ensure your user has the necessary filesystem permissions.
 
 ---
-
-## Screenshots
-
-Add screenshots or GIFs here. (Place image files under `docs/` and reference them with Markdown.)
-
-Example:
-````markdown
-![Main window screenshot](docs/screenshot-main.png)
-````
-
----
-
-## License
-
-No license specified for this repository.
+[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/mufaddalkothari)
