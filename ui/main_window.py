@@ -549,6 +549,7 @@ class MainWindow(QWidget):
 
     def _on_search_finished(self):
         self.search_btn.setEnabled(True)
+        logger.info("Search Completd")
         try:
             self.progress.setValue(100)
         except Exception:
