@@ -4,20 +4,18 @@
 # - find_uniques(ref_files, work_files, criteria)
 #
 # This implementation:
-# - Uses HashStore for transient in-memory or on-disk cache (if available)
-# - Consults CacheDB (if available) to reuse persisted dhash hex values
+
 # - Computes missing hashes in a ThreadPoolExecutor (safe on macOS)
 # - Uses integer popcount((a ^ b)) for Hamming distance checks with a compatibility fallback
-#
-# The code is defensive: if CacheDB or HashStore are missing it still works.
 
+from core.hash_utils import _compute_hashes_parallel, _normalize_path
 from typing import List, Tuple, Dict, Any, Optional
 import logging
 import os
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
+from collections import defaultdict
 from PIL import Image, ImageOps, UnidentifiedImageError
 import imagehash
 
@@ -55,28 +53,6 @@ def _image_dhash(path: str, hash_size: int = DEFAULT_HASH_SIZE) -> Optional[imag
     except Exception as e:
         logger.exception("Unexpected error hashing %s: %s", path, e)
         return None
-
-
-def _compute_hashes_parallel(paths: List[str], hash_size: int = DEFAULT_HASH_SIZE, max_workers: int = DEFAULT_MAX_WORKERS, timeout_per_future: Optional[float] = None) -> Dict[str, imagehash.ImageHash]:
-    """
-    Compute hashes for multiple paths in parallel using ThreadPoolExecutor.
-    Returns dict path -> ImageHash (only successful entries present).
-    """
-    out: Dict[str, imagehash.ImageHash] = {}
-    if not paths:
-        return out
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_image_dhash, p, hash_size): p for p in paths}
-        for fut in as_completed(futures):
-            p = futures[fut]
-            try:
-                h = fut.result(timeout=timeout_per_future)
-                if h is not None:
-                    out[p] = h
-            except Exception as e:
-                logger.debug("Hashing failed for %s: %s", p, e)
-    return out
-
 
 def _hex_to_imagehash(hexstr: str) -> Optional[imagehash.ImageHash]:
     try:
@@ -118,121 +94,66 @@ def _max_hamming_from_similarity(hash_bits: int, similarity_percent: float) -> i
 
 
 # --- core functions ---------------------------------------------------------
-def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[str, Any]) -> List[Tuple[Any, Any, List[str]]]:
+
+def find_matches(
+    ref_files: List[Any],
+    work_files: List[Any],
+    criteria: Dict[str, Any],
+) -> Tuple[List[Tuple[Any, Any, List[str]]], List[Any], List[Any]]:
     """
-    Find duplicates between ref_files and work_files.
-    ref_files / work_files are lists of objects that at minimum have 'path' property.
-    Returns list of tuples (ref_file_obj, work_file_obj, [reasons...])
-    Criteria keys:
-      - hash (bool): whether to do hash-based matching
-      - hash_size (int) optional
-      - similarity (float) optional (percent, e.g., 90)
-      - fields (list) optional - not used here (metadata matching is out of scope)
+    Unified function that computes duplicate matches and uniques in one pass.
+
+    Returns a tuple: (matches, uniques_ref, uniques_work)
+      - matches: List of (ref_obj, work_obj, [reasons])
+      - uniques_ref: list of ref objects that had NO match in work_files
+      - uniques_work: list of work objects that had NO match in ref_files
+
+    Behavior:
+    - If criteria['hash'] is truthy, uses hash-based comparison (fast).
+      * Hashing is done once for both sets using _compute_hashes_parallel which returns
+        canonical_path -> ImageHash. Canonicalization is performed by that helper.
+      * Hamming threshold is derived from criteria['similarity'] and criteria['hash_size'].
+      * Matching: compares everything with everything and records all matches (no early break).
+      * uniques are determined by canonical-path membership in matched sets.
+    - If criteria['hash'] is falsy, falls back to metadata (name/size) logic:
+      * matches: basename equality (same as previous non-hash behavior).
+      * uniques: determined by (basename, size) absence (same as previous non-hash).
     """
     matches: List[Tuple[Any, Any, List[str]]] = []
-    if not ref_files or not work_files:
-        return matches
-
-    use_hash = bool(criteria.get("hash"))
-    hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
-    similarity = float(criteria.get("similarity") or 90.0)
-    hash_bits = hash_size * hash_size
-    max_hamming = _max_hamming_from_similarity(hash_bits, similarity)
-
-    logger.debug("find_duplicates: use_hash=%s hash_size=%d similarity=%s%% -> max_hamming=%d", use_hash, hash_size, similarity, max_hamming)
-
-    if not use_hash:
-        # fallback: simple path equality / name matching (very basic)
-        ref_map = {os.path.basename(f.path): f for f in ref_files if getattr(f, "path", None)}
-        for w in work_files:
-            name = os.path.basename(getattr(w, "path", ""))
-            ref = ref_map.get(name)
-            if ref:
-                matches.append((ref, w, ["name"]))
-        return matches
-
-    # Hash-based flow:
-    # 1) prepare path lists
-    ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
-    work_paths = [f.path for f in work_files if getattr(f, "path", None)]
-
-    # 2) try to get ref hashes from HashStore (in-memory / transient) and CacheDB
-    ref_hash_map: Dict[str, imagehash.ImageHash] = {}
-
-    missing_ref_paths = [p for p in ref_paths if p not in ref_hash_map]
-    if missing_ref_paths:
-        logger.debug("Computing %d missing reference hashes", len(missing_ref_paths))
-        computed = _compute_hashes_parallel(missing_ref_paths, hash_size)
-        # computed is path -> ImageHash
-        for p, h in computed.items():
-            ref_hash_map[p] = h
-
-    # 5) compute work hashes (do not store them)
-    work_hash_map: Dict[str, imagehash.ImageHash] = {}
-    if work_paths:
-        logger.debug("Computing %d work hashes", len(work_paths))
-        work_hash_map = _compute_hashes_parallel(work_paths, hash_size)
-
-    # 6) convert ref_hash_map and work_hash_map to integer bitmasks for fast hamming
-    ref_int_map: Dict[str, int] = {}
-    for p, h in ref_hash_map.items():
-        try:
-            ref_int_map[p] = _imagehash_to_int(h)
-        except Exception:
-            # fallback: skip
-            logger.debug("Failed to convert ref hash to int for %s", p)
-
-    work_int_map: Dict[str, int] = {}
-    for p, h in work_hash_map.items():
-        try:
-            work_int_map[p] = _imagehash_to_int(h)
-        except Exception:
-            logger.debug("Failed to convert work hash to int for %s", p)
-
-    # 7) naive pairwise comparison with early pruning by prefix (if stored)
-    # For now do full compare between ref and work items; for large datasets a prefix-index DB query should be used.
-    for w_obj in work_files:
-        wp = getattr(w_obj, "path", None)
-        if not wp or wp not in work_int_map:
-            continue
-        wint = work_int_map[wp]
-        for r_obj in ref_files:
-            rp = getattr(r_obj, "path", None)
-            if not rp or rp not in ref_int_map:
-                continue
-            rint = ref_int_map[rp]
-            dist = _hamming_distance_int(rint, wint)
-            if dist <= max_hamming:
-                # record match; could include other reasons/details
-                matches.append((r_obj, w_obj, [f"dhash:{dist}"]))
-                break
-
-    return matches
-
-
-def find_uniques(ref_files: List[Any], work_files: List[Any], criteria: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
-    """
-    Return (unique_in_ref, unique_in_work) lists.
-    If criteria.hash is True, uses hash-based uniqueness detection (fast).
-    Otherwise falls back to metadata (size/name) which is less robust.
-    """
     uniques_ref: List[Any] = []
     uniques_work: List[Any] = []
 
+    if not ref_files and not work_files:
+        return matches, uniques_ref, uniques_work
+    if not ref_files:
+        return matches, [], list(work_files or [])
+    if not work_files:
+        return matches, list(ref_files or []), []
+
     use_hash = bool(criteria.get("hash"))
     hash_size = int(criteria.get("hash_size") or DEFAULT_HASH_SIZE)
     similarity = float(criteria.get("similarity") or 90.0)
     hash_bits = hash_size * hash_size
     max_hamming = _max_hamming_from_similarity(hash_bits, similarity)
 
-    # Quick path: no inputs
-    if not ref_files:
-        return ([], list(work_files or []))
-    if not work_files:
-        return (list(ref_files or []), [])
+    logger.debug(
+        "find_matches: use_hash=%s hash_size=%d similarity=%s%% -> max_hamming=%d",
+        use_hash,
+        hash_size,
+        similarity,
+        max_hamming,
+    )
 
     if not use_hash:
-        # basic metadata-based uniqueness: match by size+name
+        # Non-hash: matches by basename (old behavior), uniques by basename+size (old behavior)
+        ref_map_by_basename = {os.path.basename(f.path): f for f in ref_files if getattr(f, "path", None)}
+        for w in work_files:
+            name = os.path.basename(getattr(w, "path", ""))
+            ref = ref_map_by_basename.get(name)
+            if ref:
+                matches.append((ref, w, ["name"]))
+
+        # Uniques using (basename, size)
         work_map = {}
         for w in work_files:
             key = (os.path.basename(getattr(w, "path", "")), getattr(w, "size", None))
@@ -241,7 +162,7 @@ def find_uniques(ref_files: List[Any], work_files: List[Any], criteria: Dict[str
             key = (os.path.basename(getattr(r, "path", "")), getattr(r, "size", None))
             if key not in work_map:
                 uniques_ref.append(r)
-        # work uniques
+
         ref_map = {}
         for r in ref_files:
             key = (os.path.basename(getattr(r, "path", "")), getattr(r, "size", None))
@@ -250,55 +171,101 @@ def find_uniques(ref_files: List[Any], work_files: List[Any], criteria: Dict[str
             key = (os.path.basename(getattr(w, "path", "")), getattr(w, "size", None))
             if key not in ref_map:
                 uniques_work.append(w)
-        return uniques_ref, uniques_work
 
-    # Hash-based uniqueness:
-    ref_paths = [f.path for f in ref_files if getattr(f, "path", None)]
-    work_paths = [f.path for f in work_files if getattr(f, "path", None)]
+        return matches, uniques_ref, uniques_work
 
-    # Build hash maps using same flow as find_duplicates (CacheDB + HashStore + compute missing)
-    ref_hash_map: Dict[str, imagehash.ImageHash] = {}
-    work_hash_map: Dict[str, imagehash.ImageHash] = {}
+    # HASH-BASED PATH
+    # Build canonical-path -> [objects] maps and collect original input paths for hashing
+    ref_canon_to_objs: Dict[str, List[Any]] = defaultdict(list)
+    ref_input_paths: List[str] = []
+    for f in ref_files:
+        p = getattr(f, "path", None)
+        if not p:
+            continue
+        canon = _normalize_path(p)
+        ref_canon_to_objs[canon].append(f)
+        ref_input_paths.append(p)
 
-    # Compute remaining ref hashes
-    missing_refs = [p for p in ref_paths if p not in ref_hash_map]
-    if missing_refs:
-        computed_ref = _compute_hashes_parallel(missing_refs, hash_size)
-        for p, h in computed_ref.items():
-            ref_hash_map[p] = h
+    work_canon_to_objs: Dict[str, List[Any]] = defaultdict(list)
+    work_input_paths: List[str] = []
+    for w in work_files:
+        p = getattr(w, "path", None)
+        if not p:
+            continue
+        canon = _normalize_path(p)
+        work_canon_to_objs[canon].append(w)
+        work_input_paths.append(p)
 
-    # Compute work hashes (do not store)
-    work_hash_map = _compute_hashes_parallel(work_paths, hash_size)
+    # Compute hashes (these return canonical_path -> ImageHash)
+    ref_hash_map = _compute_hashes_parallel(ref_input_paths, hash_size)
+    work_hash_map = _compute_hashes_parallel(work_input_paths, hash_size)
 
-    # Convert to ints
-    ref_int_map = {p: _imagehash_to_int(h) for p, h in ref_hash_map.items() if h is not None}
-    work_int_map = {p: _imagehash_to_int(h) for p, h in work_hash_map.items() if h is not None}
+    # Convert to integer bitmasks for fast hamming
+    ref_int_map: Dict[str, int] = {}
+    for canon_path, h in ref_hash_map.items():
+        try:
+            if h is not None:
+                ref_int_map[canon_path] = _imagehash_to_int(h)
+        except Exception:
+            logger.debug("Failed to convert ref hash to int for %s", canon_path)
 
-    # Build match sets: mark all work paths that match any ref within threshold
-    matched_work_paths = set()
-    matched_ref_paths = set()
+    work_int_map: Dict[str, int] = {}
+    for canon_path, h in work_hash_map.items():
+        try:
+            if h is not None:
+                work_int_map[canon_path] = _imagehash_to_int(h)
+        except Exception:
+            logger.debug("Failed to convert work hash to int for %s", canon_path)
 
-    for rp, rint in ref_int_map.items():
-        for wp, wint in work_int_map.items():
+    # For duplicate matching:
+    matched_ref_canons = set()
+    matched_work_canons = set()
+
+    # Compare everything-with-everything and record all matches (no early break)
+    # Iterate over each work object and compare it against all ref canonical hashes.
+    for w_obj in work_files:
+        wp = getattr(w_obj, "path", None)
+        if not wp:
+            continue
+        wp_canon = _normalize_path(wp)
+        if wp_canon not in work_int_map:
+            continue
+        wint = work_int_map[wp_canon]
+
+        # Compare with every ref canonical hash and record matches
+        for rp_canon, rint in ref_int_map.items():
             try:
                 dist = _hamming_distance_int(rint, wint)
             except Exception:
                 continue
             if dist <= max_hamming:
-                matched_ref_paths.add(rp)
-                matched_work_paths.add(wp)
+                # Record match(s) between all ref objects under rp_canon and this single work object
+                refs = ref_canon_to_objs.get(rp_canon, [])
+                for ref_obj in refs:
+                    matches.append((ref_obj, w_obj, [f"dhash:{dist}"]))
+                matched_ref_canons.add(rp_canon)
+                matched_work_canons.add(wp_canon)
 
-    # uniques are those not matched
-    ref_map_by_path = {f.path: f for f in ref_files if getattr(f, "path", None)}
-    work_map_by_path = {f.path: f for f in work_files if getattr(f, "path", None)}
+    # Compute uniques: objects whose canonical paths were not matched
+    for canon, ref_objs in ref_canon_to_objs.items():
+        if canon not in matched_ref_canons:
+            uniques_ref.extend(ref_objs)
 
-    for p in ref_paths:
-        if p not in matched_ref_paths:
-            if p in ref_map_by_path:
-                uniques_ref.append(ref_map_by_path[p])
-    for p in work_paths:
-        if p not in matched_work_paths:
-            if p in work_map_by_path:
-                uniques_work.append(work_map_by_path[p])
+    for canon, work_objs in work_canon_to_objs.items():
+        if canon not in matched_work_canons:
+            uniques_work.extend(work_objs)
 
+    return matches, uniques_ref, uniques_work
+
+
+# Backwards-compatible thin wrappers
+def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[str, Any]) -> List[Tuple[Any, Any, List[str]]]:
+    """Return only matches (keeps old API)."""
+    matches, _, _ = find_matches(ref_files, work_files, criteria)
+    return matches
+
+
+def find_uniques(ref_files: List[Any], work_files: List[Any], criteria: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
+    """Return only uniques (keeps old API)."""
+    _, uniques_ref, uniques_work = find_matches(ref_files, work_files, criteria)
     return uniques_ref, uniques_work

@@ -20,14 +20,14 @@ from PyQt5.QtCore import Qt, pyqtSignal, QThread, QSettings, QDir, QModelIndex
 from PyQt5.QtGui import QPixmap, QIcon
 
 from core.image_scanner import scan_images_in_directory, ImageFileObj
-from core.comparator import find_duplicates, find_uniques
+from core.comparator import find_duplicates, find_uniques, find_matches
 from .styles import GLASSY_STYLE, DARK_STYLE
 from .comparison_modal import ComparisonModal
 from .hash_info_dialog import HashInfoDialog
 from send2trash import send2trash
-from core.cache_db import CacheDB
-from core.indexer import Indexer
-from .cached_dirs_modal import CachedDirsModal
+# from core.cache_db import CacheDB
+# from core.indexer import Indexer
+# from .cached_dirs_modal import CachedDirsModal
 logger = logging.getLogger(__name__)
 
 
@@ -120,22 +120,15 @@ class SearchThread(QThread):
         duplicates = []
         uniques = ([], [])
         try:
-            duplicates = find_duplicates(ref_files, work_files, self.criteria)
+            duplicates, unique_ref,unique_work = find_matches(ref_files, work_files, self.criteria)
         except Exception:
             logger.exception("find_duplicates failed")
-        try:
-            uniques = find_uniques(ref_files, work_files, self.criteria)
-            if uniques is None:
-                uniques = ([], [])
-        except Exception:
-            logger.exception("find_uniques failed")
-            uniques = ([], [])
 
         self.progress.emit(95)
         self.results_ready.emit({
             "duplicates": duplicates,
-            "unique_in_ref": uniques[0],
-            "unique_in_work": uniques[1],
+            "unique_in_ref": unique_ref,
+            "unique_in_work": unique_work,
             "ref_files": ref_files,
             "work_files": work_files,
             "criteria": self.criteria
@@ -153,9 +146,9 @@ class MainWindow(QWidget):
         self._settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
         theme = self._settings.value("theme", "light")
         self._apply_theme(theme)
-        self._cache_db = CacheDB()
-        self._indexer = Indexer(self._cache_db)
-        self._indexer.start()
+        # self._cache_db = CacheDB()
+        # self._indexer = Indexer(self._cache_db)
+        # self._indexer.start()
         # internal state
         self._thread = None
         self._last_results = None
@@ -471,8 +464,9 @@ class MainWindow(QWidget):
             self.hash_cb.setChecked(False)
             # Cached Model
     def _open_cached_modal(self):
-        dlg = CachedDirsModal(self._cache_db, self._indexer, parent=self)
-        dlg.exec_()
+        pass
+        # dlg = CachedDirsModal(self._cache_db, self._indexer, parent=self)
+        # dlg.exec_()
         # refresh UI if needed after dialog closes
     # ---------- search flow ----------
     def on_search_clicked(self):
