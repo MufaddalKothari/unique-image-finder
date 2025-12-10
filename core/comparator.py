@@ -23,17 +23,6 @@ import imagehash
 
 logger = logging.getLogger(__name__)
 
-# Try to import optional modules (these exist in the repo)
-try:
-    from core.hashstore import HashStore
-except Exception:
-    HashStore = None
-
-try:
-    from core.cache_db import CacheDB
-except Exception:
-    CacheDB = None
-
 # Default hash size (dhash parameter)
 DEFAULT_HASH_SIZE = 16
 # Default thread pool size
@@ -169,45 +158,7 @@ def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[
 
     # 2) try to get ref hashes from HashStore (in-memory / transient) and CacheDB
     ref_hash_map: Dict[str, imagehash.ImageHash] = {}
-    if HashStore is not None:
-        try:
-            hs = HashStore()
-            try:
-                store_hits = hs.bulk_get(ref_paths, hash_size)
-                logger.debug("HashStore: cache hits=%d for reference files", len(store_hits))
-                # HashStore returns mapping path->ImageHash or maybe hex; ensure type
-                for p, hv in store_hits.items():
-                    # if hv is a hex string, convert; else assume ImageHash
-                    if isinstance(hv, str):
-                        ih = _hex_to_imagehash(hv)
-                        if ih:
-                            ref_hash_map[p] = ih
-                    else:
-                        ref_hash_map[p] = hv
-            finally:
-                try:
-                    hs.close()
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("HashStore unavailable: %s", e)
 
-    # 3) consult CacheDB for missing ref hashes (persisted)
-    missing_ref_paths = [p for p in ref_paths if p not in ref_hash_map]
-    if CacheDB is not None and missing_ref_paths:
-        try:
-            cache_db = CacheDB()
-            db_hits = cache_db.get_hashes_for_paths(missing_ref_paths, hash_size)
-            if db_hits:
-                logger.debug("CacheDB: cache hits=%d for reference files", len(db_hits))
-                for p, hexv in db_hits.items():
-                    ih = _hex_to_imagehash(hexv)
-                    if ih:
-                        ref_hash_map[p] = ih
-        except Exception as e:
-            logger.debug("CacheDB lookup failed: %s", e)
-
-    # 4) compute missing ref hashes in parallel
     missing_ref_paths = [p for p in ref_paths if p not in ref_hash_map]
     if missing_ref_paths:
         logger.debug("Computing %d missing reference hashes", len(missing_ref_paths))
@@ -215,17 +166,6 @@ def find_duplicates(ref_files: List[Any], work_files: List[Any], criteria: Dict[
         # computed is path -> ImageHash
         for p, h in computed.items():
             ref_hash_map[p] = h
-            # attempt to populate transient HashStore if available
-            try:
-                if HashStore is not None:
-                    try:
-                        hs = HashStore()
-                        hs.set(p, h, hash_size)
-                        hs.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
 
     # 5) compute work hashes (do not store them)
     work_hash_map: Dict[str, imagehash.ImageHash] = {}
@@ -320,54 +260,12 @@ def find_uniques(ref_files: List[Any], work_files: List[Any], criteria: Dict[str
     ref_hash_map: Dict[str, imagehash.ImageHash] = {}
     work_hash_map: Dict[str, imagehash.ImageHash] = {}
 
-    # Try HashStore for refs
-    if HashStore is not None:
-        try:
-            hs = HashStore()
-            try:
-                r_hits = hs.bulk_get(ref_paths, hash_size)
-                for p, hv in r_hits.items():
-                    if isinstance(hv, str):
-                        ih = _hex_to_imagehash(hv)
-                        if ih:
-                            ref_hash_map[p] = ih
-                    else:
-                        ref_hash_map[p] = hv
-            finally:
-                try:
-                    hs.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Try CacheDB for missing refs
-    missing_refs = [p for p in ref_paths if p not in ref_hash_map]
-    if CacheDB is not None and missing_refs:
-        try:
-            cdb = CacheDB()
-            db_hits = cdb.get_hashes_for_paths(missing_refs, hash_size)
-            for p, hexv in db_hits.items():
-                ih = _hex_to_imagehash(hexv)
-                if ih:
-                    ref_hash_map[p] = ih
-        except Exception:
-            pass
-
     # Compute remaining ref hashes
     missing_refs = [p for p in ref_paths if p not in ref_hash_map]
     if missing_refs:
         computed_ref = _compute_hashes_parallel(missing_refs, hash_size)
         for p, h in computed_ref.items():
             ref_hash_map[p] = h
-            # attempt to populate HashStore transient cache
-            try:
-                if HashStore is not None:
-                    hs = HashStore()
-                    hs.set(p, h, hash_size)
-                    hs.close()
-            except Exception:
-                pass
 
     # Compute work hashes (do not store)
     work_hash_map = _compute_hashes_parallel(work_paths, hash_size)
