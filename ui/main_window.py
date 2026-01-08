@@ -252,8 +252,8 @@ class MainWindow(QWidget):
         self.work_dir.setText(self._settings.value("last_work", ""))
         work_browse = make_button("Browse", style_class="neutral")
         work_browse.clicked.connect(lambda: self._browse_and_set(self.work_dir))
-        top_row.addWidget(QLabel("Reference:"))
-        top_row.addWidget(self.ref_dir, 2)
+        top_row.addWidget(QLabel("Reference (Not for Delete):"))
+        top_row.addWidget(self.ref_dir, 2)  
         top_row.addWidget(ref_browse)
         top_row.addSpacing(8)
         top_row.addWidget(QLabel("Working:"))
@@ -360,11 +360,11 @@ class MainWindow(QWidget):
 
         # footer with action buttons
         footer_row = QHBoxLayout()
-        self.delete_btn = make_button("Delete duplicates", style_class="danger")
+        self.delete_btn = make_button("Delete duplicates from Working", style_class="danger")
         self.delete_btn.clicked.connect(self._on_delete_all_duplicates)
         self.keep_btn = make_button("Keep", style_class="success")
         self.keep_btn.clicked.connect(self._on_keep_all_duplicates)
-        self.save_uniques_btn = make_button("Save Uniques", style_class="success")
+        self.save_uniques_btn = make_button("Save Uniques from Both Folders", style_class="success")
         self.save_uniques_btn.clicked.connect(self._on_save_uniques)
 
         # Add Move Selected and Delete Selected buttons
