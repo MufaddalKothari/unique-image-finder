@@ -165,6 +165,47 @@ class MainWindow(QWidget):
         else:
             self.setStyleSheet(GLASSY_STYLE)
 
+
+    # ---------- layout helpers for tab select all ----------
+    def _toggle_all_in_layout(self, state, layout):
+        """
+        Toggle the state of all checkboxes in the given layout based on the 'Select All' checkbox,
+        and update the application state (_selected_paths) accordingly.
+
+        Args:
+            state (int): The state of the 'Select All' checkbox (0 = unchecked, 2 = checked).
+            layout (QVBoxLayout): The layout containing the dynamically added rows with checkboxes.
+        """
+        select_all = state > 0  # True if the 'Select All' checkbox is checked, False otherwise
+
+        # Iterate over all the widgets in the layout (rows of duplicates or uniques)
+        for i in range(layout.count()):
+            item = layout.itemAt(i)  # Get the layout item
+            if item is not None:
+                row_widget = item.widget()  # This is the QFrame or row container
+                if row_widget is not None:
+                    # Check for any QCheckBox inside the row widget
+                    checkboxes = row_widget.findChildren(QCheckBox)
+                    for checkbox in checkboxes:
+                        # Avoid altering the "Select All" checkbox itself
+                        if checkbox != layout.itemAt(0).widget():
+                            path = checkbox.property("path")  # Assume `path` is stored in the checkbox
+                            if select_all and path:
+                                # Add the path to the selection state
+                                self._selected_paths.add(path)
+                            elif not select_all and path:
+                                # Remove the path from the selection state
+                                self._selected_paths.discard(path)
+
+                            checkbox.blockSignals(True)  # Prevent triggering signals while toggling
+                            checkbox.setChecked(select_all)  # Set the checkbox state
+                            checkbox.blockSignals(False)
+
+        # Update the UI footer or other relevant state display
+        self._update_selected_count()
+
+
+
     # ---------- UI construction ----------
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
@@ -329,27 +370,51 @@ class MainWindow(QWidget):
         self.tabs.tabBar().setUsesScrollButtons(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # duplicates tab
+        # Duplicates tab
         self.duplicates_container = QWidget()
         self.duplicates_layout = QVBoxLayout(self.duplicates_container)
+
+        # Add 'Select All' checkbox for duplicates
+        self.select_all_duplicates_checkbox = QCheckBox("Select All Duplicates")
+        self.select_all_duplicates_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.duplicates_layout)
+        )
+        self.duplicates_layout.addWidget(self.select_all_duplicates_checkbox)
+
         self.duplicates_layout.setAlignment(Qt.AlignTop)
         self.duplicates_scroll = QScrollArea()
         self.duplicates_scroll.setWidgetResizable(True)
         self.duplicates_scroll.setWidget(self.duplicates_container)
         self.tabs.addTab(self.duplicates_scroll, "Duplicates (0)")
 
-        # uniques ref tab
+        # Uniques (Ref) tab
         self.uniques_ref_container = QWidget()
         self.uniques_ref_layout = QVBoxLayout(self.uniques_ref_container)
+
+        # Add 'Select All' checkbox for uniques (Ref)
+        self.select_all_uniques_ref_checkbox = QCheckBox("Select All Unique Reference Files")
+        self.select_all_uniques_ref_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.uniques_ref_layout)
+        )
+        self.uniques_ref_layout.addWidget(self.select_all_uniques_ref_checkbox)
+
         self.uniques_ref_layout.setAlignment(Qt.AlignTop)
         self.uniques_ref_scroll = QScrollArea()
         self.uniques_ref_scroll.setWidgetResizable(True)
         self.uniques_ref_scroll.setWidget(self.uniques_ref_container)
         self.tabs.addTab(self.uniques_ref_scroll, "Uniques (Ref) (0)")
 
-        # uniques work tab
+        # Uniques (Work) tab
         self.uniques_work_container = QWidget()
         self.uniques_work_layout = QVBoxLayout(self.uniques_work_container)
+
+        # Add 'Select All' checkbox for uniques (Work)
+        self.select_all_uniques_work_checkbox = QCheckBox("Select All Unique Working Files")
+        self.select_all_uniques_work_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.uniques_work_layout)
+        )
+        self.uniques_work_layout.addWidget(self.select_all_uniques_work_checkbox)
+
         self.uniques_work_layout.setAlignment(Qt.AlignTop)
         self.uniques_work_scroll = QScrollArea()
         self.uniques_work_scroll.setWidgetResizable(True)
@@ -511,35 +576,74 @@ class MainWindow(QWidget):
     def _on_results_ready(self, payload: dict):
         self._last_results = payload
         self._selected_paths.clear()
+
+        # Extract the results
         duplicates = payload.get("duplicates", [])
         uref = payload.get("unique_in_ref", [])
         uwork = payload.get("unique_in_work", [])
-        # update tab counts
+
+        # Update tab counts
         self.tabs.setTabText(0, f"Duplicates ({len(duplicates)})")
         self.tabs.setTabText(1, f"Uniques (Ref) ({len(uref)})")
         self.tabs.setTabText(2, f"Uniques (Work) ({len(uwork)})")
-        # populate tabs (clear then add)
+
+        # Clear tabs
         self._clear_tabs()
+
+        # Re-add "Select All" checkboxes
+        self.select_all_duplicates_checkbox = QCheckBox("Select All Duplicates")
+        self.select_all_uniques_ref_checkbox = QCheckBox("Select All Unique Reference Files")
+        self.select_all_uniques_work_checkbox = QCheckBox("Select All Unique Working Files")
+
+        # Connect "Select All" functionality
+        self.select_all_duplicates_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.duplicates_layout)
+        )
+        self.select_all_uniques_ref_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.uniques_ref_layout)
+        )
+        self.select_all_uniques_work_checkbox.stateChanged.connect(
+            lambda state: self._toggle_all_in_layout(state, self.uniques_work_layout)
+        )
+
+        # Add "Select All" checkboxes back to the respective layouts
+        self.duplicates_layout.addWidget(self.select_all_duplicates_checkbox)
+        self.uniques_ref_layout.addWidget(self.select_all_uniques_ref_checkbox)
+        self.uniques_work_layout.addWidget(self.select_all_uniques_work_checkbox)
+
+        # Reset "Select All" checkboxes to unchecked
+        self.select_all_duplicates_checkbox.setChecked(False)
+        self.select_all_uniques_ref_checkbox.setChecked(False)
+        self.select_all_uniques_work_checkbox.setChecked(False)
+
+        # Populate Duplicates Tab
         if duplicates:
             for r, w, reasons in duplicates:
                 self._add_duplicate(r, w, reasons)
         else:
             self._add_label(self.duplicates_layout, "No duplicates found.")
+
+        # Populate Uniques (Reference) Tab
         if uref:
             for f in uref:
                 self._add_unique(f, side="ref")
         else:
             self._add_label(self.uniques_ref_layout, "<i>No unique files in Reference</i>")
+
+        # Populate Uniques (Work) Tab
         if uwork:
             for f in uwork:
                 self._add_unique(f, side="work")
         else:
             self._add_label(self.uniques_work_layout, "<i>No unique files in Working</i>")
+
+        # Re-enable the Search button
         self.search_btn.setEnabled(True)
         try:
             self.progress.setValue(100)
         except Exception:
             pass
+
 
     def _on_search_finished(self):
         self.search_btn.setEnabled(True)
@@ -573,8 +677,10 @@ class MainWindow(QWidget):
         row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
         rl = QHBoxLayout(row)
         cb_r = QCheckBox()
+        cb_r.setProperty("path", r.path) 
         cb_r.stateChanged.connect(lambda s, p=r.path: self._toggle_selection(p, s))
         cb_w = QCheckBox()
+        cb_w.setProperty("path", w.path) 
         cb_w.stateChanged.connect(lambda s, p=w.path: self._toggle_selection(p, s))
         thumb_r = QLabel()
         pixr = QPixmap(r.path)
@@ -602,6 +708,7 @@ class MainWindow(QWidget):
         row.setStyleSheet("background: rgba(255,255,255,0.02); border-radius:8px;")
         rl = QHBoxLayout(row)
         cb = QCheckBox()
+        cb.setProperty("path", f.path)
         cb.stateChanged.connect(lambda s, p=f.path: self._toggle_selection(p, s))
         thumb = QLabel()
         pix = QPixmap(f.path)
