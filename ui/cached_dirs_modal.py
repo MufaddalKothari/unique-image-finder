@@ -1,10 +1,10 @@
 # ui/cached_dirs_modal.py
 # Regenerated cached directories modal with colored action buttons and improved info display.
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QListWidget, QListWidgetItem,
     QWidget, QMessageBox, QFileDialog, QProgressBar, QSizePolicy
 )
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 from core.cache_db import CacheDB
 from core.indexer import Indexer
 import os

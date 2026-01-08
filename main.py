@@ -63,7 +63,7 @@ warnings.simplefilter("default")
 def main(argv):
     logging.info("Starting Unique Image Finder application")
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
         # import the MainWindow from the UI package
         from ui.main_window import MainWindow
     except Exception:
@@ -86,4 +86,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:
+        # Catch unhandled exceptions and display them
+        print(f"Unhandled exception: {str(e)}")  # Print the error message
+        input("Press Enter to close...")  # Wait for user input so the terminal doesn't close
+        sys.exit(1)  # Exit with a non-zero code to indicate failure
+    

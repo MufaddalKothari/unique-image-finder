@@ -10,15 +10,17 @@ from pathlib import Path
 from typing import List
 import logging
 
-from PyQt5.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QFileDialog, QCheckBox, QProgressBar, QScrollArea,
-    QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QAction, QSlider,
+    QSizePolicy, QFrame, QMessageBox, QToolButton, QMenu, QSlider,
     QTabWidget, QApplication, QStyle, QTreeView, QFileSystemModel
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, QSettings, QDir, QModelIndex
-from PyQt5.QtGui import QPixmap, QIcon
+from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, Signal,QThread, QSettings, QDir, QModelIndex
 
+from PySide6.QtGui import QPixmap, QIcon
+# from PyQt5 import sip
 from core.image_scanner import scan_images_in_directory, ImageFileObj
 from core.comparator import find_duplicates, find_uniques, find_matches
 from .styles import GLASSY_STYLE, DARK_STYLE
@@ -100,8 +102,8 @@ def make_button(text: str = "", icon: QIcon = None, object_name: str = "", style
 
 class SearchThread(QThread):
     """Background thread: scans folders and runs comparator."""
-    results_ready = pyqtSignal(object)
-    progress = pyqtSignal(int)
+    results_ready = Signal(object)
+    progress = Signal(int)
 
     def __init__(self, ref_dir: str, work_dir: str, criteria: dict):
         super().__init__()
